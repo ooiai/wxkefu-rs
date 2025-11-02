@@ -87,3 +87,49 @@ Issues and PRs are welcome. Please discuss major changes first to align directio
 ## License
 
 Add a `LICENSE` file that matches your project’s preferred license (e.g., MIT/Apache-2.0).
+
+## Rust Example: Fetch Access Token (获取 token)
+
+Set credentials via environment variables:
+
+- Official Account / Mini Program: WX_APPID, WX_APPSECRET
+- WeCom (企业微信): WXKF_CORP_ID, WXKF_APP_SECRET
+
+```/dev/null/examples/get_token.rs#L1-40
+use wxkefu_rs::kf::{Auth, KfClient};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = KfClient::default();
+
+    // Official Account / Mini Program
+    if let (Ok(appid), Ok(secret)) = (
+        std::env::var("WX_APPID"),
+        std::env::var("WX_APPSECRET"),
+    ) {
+        let token = client
+            .get_access_token(&Auth::OfficialAccount { appid, secret })
+            .await?;
+        println!(
+            "OfficialAccount token: {}, expires_in: {}",
+            token.access_token, token.expires_in
+        );
+    }
+
+    // WeCom (企业微信)
+    if let (Ok(corp_id), Ok(corp_secret)) = (
+        std::env::var("WXKF_CORP_ID"),
+        std::env::var("WXKF_APP_SECRET"),
+    ) {
+        let token = client
+            .get_access_token(&Auth::WeCom { corp_id, corp_secret })
+            .await?;
+        println!(
+            "WeCom token: {}, expires_in: {}",
+            token.access_token, token.expires_in
+        );
+    }
+
+    Ok(())
+}
+```

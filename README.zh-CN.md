@@ -9,7 +9,65 @@ wxkefu-rs · 微信客服 API 集成 / WeChat Customer Service API Integration
 `wxkefu-rs` 旨在帮助你快速接入「微信客服」，提供一致的咨询体验，并通过 API 完成消息的收发与客服账号管理。支持使用「企业微信」扫码登录。
 
 - 官方入口：https://kf.weixin.qq.com/
-- 官方文档： https://kf.weixin.qq.com/api/doc/path/93304
+- 开发者文档: https://kf.weixin.qq.com/api/doc/path/93304
+
+## 获取 token 示例与分类
+
+根据项目语言（Rust）与 Cargo.toml 依赖，下面给出“获取 token”的最小示例，并对常见鉴权方式做分类，便于后续扩展更多 API。
+
+分类说明：
+
+- 公众号/小程序
+  - 接口：GET https://api.weixin.qq.com/cgi-bin/token
+  - 参数：grant_type=client_credential、appid、secret
+- 企业微信（WeCom）
+  - 接口：GET https://qyapi.weixin.qq.com/cgi-bin/gettoken
+  - 参数：corpid、corpsecret
+
+示例代码（基于本库 `kf` 模块，后续可在此基础上扩展更多 API 客户端）：
+
+```/dev/null/examples/get_token.rs#L1-60
+use wxkefu_rs::kf::{Auth, KfClient};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = KfClient::default();
+
+    // 公众号/小程序
+    if let (Ok(appid), Ok(secret)) = (std::env::var("WX_APPID"), std::env::var("WX_APPSECRET")) {
+        let token = client
+            .get_access_token(&Auth::OfficialAccount { appid, secret })
+            .await?;
+        println!(
+            "OfficialAccount token: {}, expires_in: {}",
+            token.access_token, token.expires_in
+        );
+    }
+
+    // 企业微信
+    if let (Ok(corp_id), Ok(corp_secret)) = (
+        std::env::var("WXKF_CORP_ID"),
+        std::env::var("WXKF_APP_SECRET"),
+    ) {
+        let token = client
+            .get_access_token(&Auth::WeCom { corp_id, corp_secret })
+            .await?;
+        println!(
+            "WeCom token: {}, expires_in: {}",
+            token.access_token, token.expires_in
+        );
+    }
+
+    Ok(())
+}
+```
+
+使用说明：
+
+- 在运行前设置环境变量：
+  - 公众号/小程序：WX_APPID、WX_APPSECRET
+  - 企业微信：WXKF_CORP_ID、WXKF_APP_SECRET
+- 将上述代码集成到你的可执行程序中运行；本库只负责 HTTP 调用与基础错误处理，Token 缓存与续期建议在上层实现。
 
 微信客服可在微信内的视频号、公众号、小程序、微信搜索、微信支付凭证，以及微信外的 App、网页等多个入口接入，为客户提供统一的咨询与服务体验。
 
