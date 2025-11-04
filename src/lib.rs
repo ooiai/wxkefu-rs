@@ -1,48 +1,39 @@
 #![doc = r#"
 wxkefu-rs
 
-面向「微信客服」的 Rust 基础库（可扩展）。当前提供获取调用凭证 access_token 的通用客户端与类型定义，
-同时兼容两类凭证体系：
-- 微信客服（企业微信侧）：使用企业ID（corpid，以 `ww...` 开头）与微信客服 Secret（corpsecret），
-  通过企业微信接口 `https://qyapi.weixin.qq.com/cgi-bin/gettoken` 获取。
-- 公众号 / 小程序：使用 appid（以 `wx...` 开头）与 appsecret，走公众平台接口
-  `https://api.weixin.qq.com/cgi-bin/token` 获取。
+A lightweight, extensible Rust crate for WeChat Customer Service (WeCom Kf) APIs.
 
-若你的目标是对接「微信客服」能力（客服账号管理、客服消息收发、会话分配等），请使用企业微信侧
-的 corpid + corpsecret 模式（即 `Auth::WeCom`）。公众平台的 appid/appsecret 不适用于
-微信客服接口的调用与鉴权。
+What this crate does
+- Provides a small HTTP client (`KfClient`) plus basic types for fetching access_token.
+- Supports two credential systems:
+  1) WeCom (Enterprise WeChat, for WeChat Customer Service/Kf)
+     - Use corpid (typically starts with `ww`) and the WeChat Customer Service Secret (corpsecret)
+     - Endpoint: https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=ID&corpsecret=SECRET
+  2) Official Account / Mini Program (OA/MP)
+     - Use appid (starts with `wx`) and appsecret
+     - Endpoint: https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=APPID&secret=APPSECRET
 
-官方文档（建议先阅读）：
-- 获取调用凭证 access_token（微信客服）：https://kf.weixin.qq.com/api/doc/path/93304
+Important
+- If your goal is to call WeChat Customer Service (Kf) APIs (agent management, message send/receive, session routing, etc.), you must use WeCom credentials (corpid + WeCom Kf Secret). OA/MP tokens are NOT accepted by Kf endpoints.
+- Official Kf docs for acquiring access_token (WeCom): https://kf.weixin.qq.com/api/doc/path/93304
 
-包含内容
-- 统一鉴权枚举 `Auth`：区分「微信客服（企业微信）」与「公众号 / 小程序」两种模式
-- 访问令牌类型 `AccessToken`
-- 错误类型 `Error`（包含 HTTP、微信错误码、解析异常等）
-- 客户端 `KfClient`：封装 HTTP 请求与返回解析，便于后续扩展更多接口
+Included
+- `Auth` enum for selecting the auth mode (`WeCom` or `OfficialAccount`)
+- `AccessToken` type with `access_token` and `expires_in`
+- `Error` enum for unified error handling (HTTP, WeChat error code, decoding issues, etc.)
+- `KfClient` with a simple `get_access_token(&Auth)` API
 
-使用说明（微信客服/企业微信）
-1. 在「微信客服管理后台-开发配置」获取企业ID（corpid）与 Secret（corpsecret）
-2. 使用 corpid + corpsecret 调用本库的 `get_access_token` 获取 access_token
-3. 按官方要求在业务侧缓存 access_token（有效期通常为 7200 秒），避免频繁获取导致限频
-4. 当 access_token 失效或过期时，再次调用获取新的 access_token
+Quick start (WeCom/Kf)
+- Get your corpid and the WeChat Customer Service Secret from: WeChat Customer Service Admin Portal → Developer Config.
+- Cache the access_token in your service to avoid hitting rate limits.
 
-注意事项（重要）
-- 微信客服使用的是企业微信侧凭证：corpid 形如 `ww...`，与公众平台 `wx...` 的 appid 不同
-- 频率限制：请缓存 access_token，避免频繁调用获取接口
-- 有效期：正常为 7200 秒；有效期内重复获取返回相同结果；过期后返回新的 access_token
-- 可能提前失效：需在业务中处理失效重取的逻辑
-- 安全建议：不要在日志中输出密钥（secret / corpsecret / access_token）
-
-快速上手示例（仅演示，代码注释均为中文）
-
-示例一：微信客服（企业微信）获取 access_token
+Example (WeCom/Kf)
 ```ignore
 use wxkefu_rs::{Auth, KfClient};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 业务侧建议将 corpid 与 corpsecret 放入安全的配置中心或环境变量中
+    // Read from environment or your secure config center.
     let corpid = std::env::var("WXKF_CORP_ID")?;
     let corpsecret = std::env::var("WXKF_APP_SECRET")?;
 
@@ -54,21 +45,21 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
 
-    // 仅演示打印；生产中不要打印密钥与 token
+    // For demo only. Do NOT print sensitive values in production.
     println!("access_token: {}, expires_in: {}", token.access_token, token.expires_in);
 
-    // 在此处将 token 缓存到你的存储（内存/Redis/DB 等），并做好过期刷新
+    // Persist the token in your cache (memory/Redis/DB) and refresh on expiry.
     Ok(())
 }
 ```
 
-示例二：公众号 / 小程序获取 access_token（注意：此模式不适用于「微信客服」接口）
+Optional (OA/MP) example
+- Only use this if you are working with OA/MP APIs (not Kf).
 ```ignore
 use wxkefu_rs::{Auth, KfClient};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 若你的业务是调用公众平台接口，可使用此模式；与微信客服无直接关联
     let appid = std::env::var("WX_APPID")?;
     let appsecret = std::env::var("WX_APPSECRET")?;
 
@@ -85,19 +76,18 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-示例三：结合 .env 使用（便于本地调试）
+Using a .env for local development
 ```ignore
 use dotenvy::dotenv;
 use wxkefu_rs::{Auth, KfClient};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 加载 .env（例如放置 WXKF_CORP_ID 与 WXKF_APP_SECRET）
     let _ = dotenv();
 
     let client = KfClient::default();
 
-    // 微信客服（企业微信）模式
+    // WeCom / Kf
     if let (Ok(corpid), Ok(corpsecret)) = (std::env::var("WXKF_CORP_ID"), std::env::var("WXKF_APP_SECRET")) {
         let token = client
             .get_access_token(&Auth::WeCom {
@@ -108,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
         println!("wecom access_token: {}, expires_in: {}", token.access_token, token.expires_in);
     }
 
-    // 公众号 / 小程序模式（若仅使用微信客服，可忽略此段）
+    // OA/MP (not needed for Kf)
     if let (Ok(appid), Ok(appsecret)) = (std::env::var("WX_APPID"), std::env::var("WX_APPSECRET")) {
         let token = client
             .get_access_token(&Auth::OfficialAccount {
@@ -123,15 +113,21 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-错误处理
-- 当微信返回非零错误码时，本库会将其映射为统一错误 `Error::Wx { code, message }`
-- 当返回体格式异常时，会给出 `Error::UnexpectedTokenResponse` 以便排查
-- 网络或解析相关错误归为 `Error::Http` 等
+Best practices and notes (aligned with the official Kf docs)
+- Cache access_token and reuse it until it expires; do not call gettoken too frequently or you will be rate-limited.
+- expires_in is typically 7200 seconds. Repeated fetches during the valid window return the same token; new tokens are returned after expiry.
+- access_token may be invalidated early for operational reasons; always handle invalidation by re-fetching.
+- Reserve enough storage (at least 512 bytes) for the token string.
+- Never print secrets or tokens in logs. Redact sensitive data.
 
-后续规划
-- 在现有 `KfClient` 基础上扩展微信客服的客服账号管理、消息收发、会话管理等接口
-- 提供访问令牌的内置缓存与自动刷新中间件（当前需由业务侧实现）
+Error handling
+- Non-zero WeChat error codes are mapped to `Error::Wx { code, message }`.
+- If the response body cannot be decoded, you get `Error::UnexpectedTokenResponse` with details to aid debugging.
+- Network/HTTP/decoding issues appear as `Error::Http` or similar.
 
+Roadmap
+- Add Kf account management, message send/receive, and session routing APIs on top of `KfClient`.
+- Provide an optional middleware for in-crate token caching and auto-refresh (currently expected to be implemented in your application layer).
 "#]
 
 pub mod token;

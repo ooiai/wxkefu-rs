@@ -1,27 +1,28 @@
 #![allow(dead_code)]
-//! 微信客服（kf）token 模块。
+//! WeChat Customer Service (Kf) token module.
 //!
-//! 提供获取 access_token 的基础类型与客户端封装，
-//! 便于后续继续扩展更多接口能力。
+//! Provides basic types and a client to fetch access_token,
+//! designed to be extended with more APIs.
 //!
-//! 设计思路：
-//! - 使用 `Auth` 区分两类鉴权（公众号/小程序 与 微信客服/企业微信）
-//! - 通过 `KfClient` 统一封装 HTTP 与错误映射；token 缓存/刷新应由更高层实现
-//! - 错误统一为 `Error`
+//! Design:
+//! - Use `Auth` to distinguish auth types (Official Account / Mini Program vs WeCom Kf).
+//! - `KfClient` handles HTTP and basic error mapping; token caching/refresh should
+//!   be implemented by the application layer.
+//! - Errors are unified via `Error`.
 //!
-//! 接口地址：
-//! - 公众号 / 小程序：GET https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=APPID&secret=APPSECRET
-//! - 微信客服（企业微信）：GET https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=CORP_ID&corpsecret=CORP_SECRET
+//! Endpoints:
+//! - Official Account / Mini Program: GET https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=APPID&secret=APPSECRET
+//! - WeCom (WeChat Customer Service): GET https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=CORP_ID&corpsecret=CORP_SECRET
 //!
-//! 注意：不同产品线/文档版本可能存在差异，请以官方文档为准。
+//! Note: Always refer to the official documentation for the most up-to-date details.
 //!
-//! 示例（伪代码）：
+//! Example (pseudo usage):
 //! ```ignore
 //! use wxkefu_rs::kf::{KfClient, Auth};
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     // 公众号 / 小程序
+//!     // Official Account / Mini Program
 //!     let client = KfClient::default();
 //!     let token = client
 //!         .get_access_token(&Auth::OfficialAccount {
@@ -31,7 +32,7 @@
 //!         .await?;
 //!     println!("mp token: {}, expires_in: {}", token.access_token, token.expires_in);
 //!
-//!     // 微信客服（企业微信）
+//!     // WeCom (WeChat Customer Service)
 //!     let wecom_token = client
 //!         .get_access_token(&Auth::WeCom {
 //!             corp_id: "your_corp_id".into(),
@@ -49,38 +50,38 @@ use serde::Deserialize;
 use thiserror::Error;
 use tracing::{debug, instrument, warn};
 
-/// 鉴权方式
+/// Authentication method
 ///
-/// - OfficialAccount：公众号 / 小程序使用 appid + appsecret
-/// - WeCom：微信客服（企业微信）使用 corp_id + corp_secret
+/// - OfficialAccount: Official Account / Mini Program uses appid + appsecret
+/// - WeCom: WeCom (WeChat Customer Service) uses corp_id + corp_secret
 #[derive(Clone, Debug)]
 pub enum Auth {
-    /// 公众号 / 小程序
+    /// Official Account / Mini Program
     OfficialAccount { appid: String, secret: String },
-    /// 微信客服（企业微信）
+    /// WeCom (WeChat Customer Service)
     WeCom {
         corp_id: String,
         corp_secret: String,
     },
 }
 
-/// 成功返回的 access_token 响应
+/// Successful access_token response
 #[derive(Clone, Debug, Deserialize)]
 pub struct AccessToken {
-    /// 调用凭证（access_token）
+    /// Access token string
     pub access_token: String,
-    /// 有效期（秒）
+    /// Expiration in seconds
     pub expires_in: u32,
 }
 
-/// 微信接口错误响应
+/// WeChat API error response
 #[derive(Clone, Debug, Deserialize)]
 pub struct WxError {
     pub errcode: i64,
     pub errmsg: String,
 }
 
-/// 原始返回（成功或错误）
+/// Raw token response (either success or error)
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
 enum TokenRawResp {
@@ -91,16 +92,16 @@ enum TokenRawResp {
 /// 统一错误类型
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("HTTP 错误: {0}")]
+    #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
 
-    #[error("URL 无效: {0}")]
+    #[error("invalid url: {0}")]
     InvalidUrl(String),
 
-    #[error("微信接口错误 {code}: {message}")]
+    #[error("weixin error {code}: {message}")]
     Wx { code: i64, message: String },
 
-    #[error("获取 access_token 的返回异常（状态 {status}）：{error}；body: {body}")]
+    #[error("unexpected token response (status {status}): {error}; body: {body}")]
     UnexpectedTokenResponse {
         status: u16,
         error: String,
@@ -110,11 +111,11 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// 微信客服基础客户端
+/// Base client for WeChat Customer Service
 ///
-/// - 封装 `reqwest::Client`
-/// - 提供获取 access_token 的基础能力（不包含缓存/自动刷新）
-/// - 便于后续扩展更多 API
+/// - Wraps `reqwest::Client`
+/// - Provides token fetching (no caching/auto-refresh here)
+/// - Easy to extend for more APIs
 #[derive(Clone, Debug)]
 pub struct KfClient {
     http: reqwest::Client,
@@ -222,7 +223,7 @@ impl KfClient {
         let status = resp.status();
         let bytes = resp.bytes().await?;
 
-        // 优先按成功/错误联合类型解码
+        // Try to decode as a success/error union first
         match serde_json::from_slice::<TokenRawResp>(&bytes) {
             Ok(TokenRawResp::Ok(ok)) => Ok(ok),
             Ok(TokenRawResp::Err(err)) => {
