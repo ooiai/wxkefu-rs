@@ -1,29 +1,27 @@
 #![allow(dead_code)]
-//! WeChat Customer Service (kf) token module.
+//! 微信客服（kf）token 模块。
 //!
-//! This module provides basic types and a client to fetch access tokens,
-//! designed to be extended with more APIs later.
+//! 提供获取 access_token 的基础类型与客户端封装，
+//! 便于后续继续扩展更多接口能力。
 //!
-//! Design:
-//! - Use `Auth` to distinguish auth types (Official Account / Mini Program vs WeCom).
-//! - `KfClient` handles HTTP and basic error mapping; token caching/refresh should
-//!   be implemented at a higher layer.
-//! - Errors are unified via `Error`.
+//! 设计思路：
+//! - 使用 `Auth` 区分两类鉴权（公众号/小程序 与 微信客服/企业微信）
+//! - 通过 `KfClient` 统一封装 HTTP 与错误映射；token 缓存/刷新应由更高层实现
+//! - 错误统一为 `Error`
 //!
-//! Token endpoints:
-//! - Official Account / Mini Program: GET https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=APPID&secret=APPSECRET
-//! - WeCom (Enterprise WeChat): GET https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=CORP_ID&corpsecret=CORP_SECRET
+//! 接口地址：
+//! - 公众号 / 小程序：GET https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=APPID&secret=APPSECRET
+//! - 微信客服（企业微信）：GET https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=CORP_ID&corpsecret=CORP_SECRET
 //!
-//! Note: Endpoints or parameters may vary across product lines or documentation
-//! versions. Always refer to the official documentation.
+//! 注意：不同产品线/文档版本可能存在差异，请以官方文档为准。
 //!
-//! Example (pseudo usage):
+//! 示例（伪代码）：
 //! ```ignore
 //! use wxkefu_rs::kf::{KfClient, Auth};
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     // Official Account / Mini Program
+//!     // 公众号 / 小程序
 //!     let client = KfClient::default();
 //!     let token = client
 //!         .get_access_token(&Auth::OfficialAccount {
@@ -33,7 +31,7 @@
 //!         .await?;
 //!     println!("mp token: {}, expires_in: {}", token.access_token, token.expires_in);
 //!
-//!     // WeCom
+//!     // 微信客服（企业微信）
 //!     let wecom_token = client
 //!         .get_access_token(&Auth::WeCom {
 //!             corp_id: "your_corp_id".into(),
@@ -49,40 +47,40 @@
 use reqwest::Url;
 use serde::Deserialize;
 use thiserror::Error;
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 
-/// Auth method
+/// 鉴权方式
 ///
-/// - OfficialAccount: Official Account / Mini Program uses appid + secret
-/// - WeCom: Enterprise WeChat uses corp_id + corp_secret
+/// - OfficialAccount：公众号 / 小程序使用 appid + appsecret
+/// - WeCom：微信客服（企业微信）使用 corp_id + corp_secret
 #[derive(Clone, Debug)]
 pub enum Auth {
-    /// Official Account / Mini Program
+    /// 公众号 / 小程序
     OfficialAccount { appid: String, secret: String },
-    /// WeCom (Enterprise WeChat)
+    /// 微信客服（企业微信）
     WeCom {
         corp_id: String,
         corp_secret: String,
     },
 }
 
-/// Successful token response
+/// 成功返回的 access_token 响应
 #[derive(Clone, Debug, Deserialize)]
 pub struct AccessToken {
-    /// Access token string
+    /// 调用凭证（access_token）
     pub access_token: String,
-    /// Expiration in seconds
+    /// 有效期（秒）
     pub expires_in: u32,
 }
 
-/// WeChat API error response
+/// 微信接口错误响应
 #[derive(Clone, Debug, Deserialize)]
 pub struct WxError {
     pub errcode: i64,
     pub errmsg: String,
 }
 
-/// Raw token response (either success or error)
+/// 原始返回（成功或错误）
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
 enum TokenRawResp {
@@ -90,19 +88,19 @@ enum TokenRawResp {
     Err(WxError),
 }
 
-/// Unified error type
+/// 统一错误类型
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("http error: {0}")]
+    #[error("HTTP 错误: {0}")]
     Http(#[from] reqwest::Error),
 
-    #[error("invalid url: {0}")]
+    #[error("URL 无效: {0}")]
     InvalidUrl(String),
 
-    #[error("weixin error {code}: {message}")]
+    #[error("微信接口错误 {code}: {message}")]
     Wx { code: i64, message: String },
 
-    #[error("unexpected token response (status {status}): {error}; body: {body}")]
+    #[error("获取 access_token 的返回异常（状态 {status}）：{error}；body: {body}")]
     UnexpectedTokenResponse {
         status: u16,
         error: String,
@@ -112,11 +110,11 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Base client for WeChat Kefu
+/// 微信客服基础客户端
 ///
-/// - Wraps `reqwest::Client`
-/// - Provides token fetching (no caching/refresh here)
-/// - Easy to extend for more APIs
+/// - 封装 `reqwest::Client`
+/// - 提供获取 access_token 的基础能力（不包含缓存/自动刷新）
+/// - 便于后续扩展更多 API
 #[derive(Clone, Debug)]
 pub struct KfClient {
     http: reqwest::Client,
@@ -133,20 +131,20 @@ impl Default for KfClient {
 }
 
 impl KfClient {
-    /// Use a custom `reqwest::Client`
+    /// 使用自定义的 `reqwest::Client`
     pub fn with_http(http: reqwest::Client) -> Self {
         Self { http }
     }
 
-    /// Fetch access_token
+    /// 获取 access_token
     ///
-    /// - OfficialAccount:
+    /// - 公众号 / 小程序：
     ///   GET https://api.weixin.qq.com/cgi-bin/token
-    ///   params: grant_type=client_credential, appid, secret
+    ///   参数：grant_type=client_credential, appid, secret（注意请勿在日志中输出密钥）
     ///
-    /// - WeCom:
+    /// - 微信客服（企业微信）：
     ///   GET https://qyapi.weixin.qq.com/cgi-bin/gettoken
-    ///   params: corpid, corpsecret
+    ///   参数：corpid, corpsecret（注意请勿在日志中输出密钥）
     #[instrument(level = "debug", skip(self, auth))]
     pub async fn get_access_token(&self, auth: &Auth) -> Result<AccessToken> {
         match auth {
@@ -159,7 +157,24 @@ impl KfClient {
                     qp.append_pair("appid", appid);
                     qp.append_pair("secret", secret);
                 }
-                debug!(%url, "requesting OfficialAccount token");
+                // 形态校验与安全日志（不输出密钥）
+                let appid_hint = {
+                    let id = appid.as_str();
+                    if id.len() <= 4 {
+                        format!("{}***", id)
+                    } else {
+                        format!("{}***{}", &id[..2], &id[id.len().saturating_sub(2)..])
+                    }
+                };
+                if appid.starts_with("ww") {
+                    warn!(
+                        "检测到 appid 以 ww 开头，这通常是企业微信 corpid；如需调用『微信客服』接口，请使用 corpid + 微信客服 Secret（Auth::WeCom）。"
+                    );
+                }
+                debug!(
+                    "请求公众平台 access_token（不包含密钥），appid 提示: {}",
+                    appid_hint
+                );
                 self.request_token(url).await
             }
             Auth::WeCom {
@@ -173,27 +188,86 @@ impl KfClient {
                     qp.append_pair("corpid", corp_id);
                     qp.append_pair("corpsecret", corp_secret);
                 }
-                debug!(%url, "requesting WeCom token");
+                // 形态校验与安全日志（不输出密钥）
+                let corp_id_hint = {
+                    let id = corp_id.as_str();
+                    if id.len() <= 4 {
+                        format!("{}***", id)
+                    } else {
+                        format!("{}***{}", &id[..2], &id[id.len().saturating_sub(2)..])
+                    }
+                };
+                if corp_id.starts_with("wx") {
+                    warn!(
+                        "检测到 corpid 以 wx 开头，这通常是公众平台 appid；『微信客服』应使用 corpid（以 ww 开头）与微信客服 Secret。"
+                    );
+                }
+                debug!(
+                    "请求企业微信 access_token（不包含密钥），corpid 提示: {}",
+                    corp_id_hint
+                );
                 self.request_token(url).await
             }
         }
     }
 
     async fn request_token(&self, url: Url) -> Result<AccessToken> {
+        // 在移动 url 进入请求之前先判断是否为企业微信接口
+        let is_wecom = url
+            .host_str()
+            .map(|h| h.contains("qyapi.weixin.qq.com"))
+            .unwrap_or(false);
+
         let resp = self.http.get(url).send().await?;
         let status = resp.status();
         let bytes = resp.bytes().await?;
 
-        // Try to decode as a success or error union first
+        // 优先按成功/错误联合类型解码
         match serde_json::from_slice::<TokenRawResp>(&bytes) {
             Ok(TokenRawResp::Ok(ok)) => Ok(ok),
-            Ok(TokenRawResp::Err(err)) => Err(Error::Wx {
-                code: err.errcode,
-                message: err.errmsg,
-            }),
+            Ok(TokenRawResp::Err(err)) => {
+                // 为企业微信（微信客服）常见错误增加提示，避免混用 appid/appsecret 与 corpid/corpsecret
+                let mut msg = err.errmsg.clone();
+                if is_wecom {
+                    let hint = match err.errcode {
+                        40013 => "；提示：corpid 不正确，请确认使用以 ww 开头的企业ID",
+                        40001 | 42001 => {
+                            "；提示：凭证无效或已过期，请检查 corpsecret 是否为『微信客服管理后台-开发配置』处获取，并实现缓存与过期刷新"
+                        }
+                        40014 | 40125 => {
+                            "；提示：secret 与 corpid 不匹配，避免误用公众号 appsecret"
+                        }
+                        _ => {
+                            "；提示：请核对 corpid 与『微信客服』Secret 是否对应，勿使用公众平台的 appid/appsecret"
+                        }
+                    };
+                    msg.push_str(hint);
+                }
+                Err(Error::Wx {
+                    code: err.errcode,
+                    message: msg,
+                })
+            }
             Err(de_err) => {
-                // If decoding fails, include more information to help diagnose
-                let body = String::from_utf8_lossy(&bytes).to_string();
+                // 解码失败时，尽量脱敏并截断 body，避免泄露 access_token 等敏感信息
+                let mut body = String::from_utf8_lossy(&bytes).to_string();
+                if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&body) {
+                    if let Some(obj) = v.as_object_mut() {
+                        if obj.get("access_token").is_some() {
+                            obj.insert(
+                                "access_token".to_string(),
+                                serde_json::Value::String("[redacted]".into()),
+                            );
+                        }
+                    }
+                    if let Ok(s) = serde_json::to_string(&v) {
+                        body = s;
+                    }
+                }
+                if body.len() > 2048 {
+                    body.truncate(2048);
+                    body.push_str("...");
+                }
                 Err(Error::UnexpectedTokenResponse {
                     status: status.as_u16(),
                     error: de_err.to_string(),
