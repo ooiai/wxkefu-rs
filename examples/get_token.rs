@@ -1,3 +1,4 @@
+use dotenvy::dotenv;
 use std::env;
 use wxkefu_rs::{Auth, KfClient};
 
@@ -12,6 +13,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // If both modes have their env vars set, both will be requested.
 
+    let _ = dotenv();
+
     let client = KfClient::default();
     let mut attempted = false;
 
@@ -20,6 +23,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (Ok(appid), Ok(secret)) => {
             attempted = true;
             println!("Requesting OfficialAccount/MiniProgram access_token...");
+            println!("appid: {}", appid);
+            println!("secret: {}", secret);
             match client
                 .get_access_token(&Auth::OfficialAccount { appid, secret })
                 .await
