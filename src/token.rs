@@ -89,7 +89,7 @@ enum TokenRawResp {
     Err(WxError),
 }
 
-/// 统一错误类型
+/// Unified error type
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("http error: {0}")]
@@ -132,20 +132,20 @@ impl Default for KfClient {
 }
 
 impl KfClient {
-    /// 使用自定义的 `reqwest::Client`
+    /// Use a custom `reqwest::Client`
     pub fn with_http(http: reqwest::Client) -> Self {
         Self { http }
     }
 
-    /// 获取 access_token
+    /// Fetch access_token
     ///
-    /// - 公众号 / 小程序：
+    /// - Official Account / Mini Program:
     ///   GET https://api.weixin.qq.com/cgi-bin/token
-    ///   参数：grant_type=client_credential, appid, secret（注意请勿在日志中输出密钥）
+    ///   params: grant_type=client_credential, appid, secret (do not log secrets)
     ///
-    /// - 微信客服（企业微信）：
+    /// - WeCom (WeChat Customer Service):
     ///   GET https://qyapi.weixin.qq.com/cgi-bin/gettoken
-    ///   参数：corpid, corpsecret（注意请勿在日志中输出密钥）
+    ///   params: corpid, corpsecret (do not log secrets)
     #[instrument(level = "debug", skip(self, auth))]
     pub async fn get_access_token(&self, auth: &Auth) -> Result<AccessToken> {
         match auth {
@@ -158,7 +158,7 @@ impl KfClient {
                     qp.append_pair("appid", appid);
                     qp.append_pair("secret", secret);
                 }
-                // 形态校验与安全日志（不输出密钥）
+                // Shape check and safe logging (no secrets)
                 let appid_hint = {
                     let id = appid.as_str();
                     if id.len() <= 4 {
@@ -169,11 +169,11 @@ impl KfClient {
                 };
                 if appid.starts_with("ww") {
                     warn!(
-                        "检测到 appid 以 ww 开头，这通常是企业微信 corpid；如需调用『微信客服』接口，请使用 corpid + 微信客服 Secret（Auth::WeCom）。"
+                        "Detected appid starting with 'ww' (likely a WeCom corpid). If you intend to call WeChat Customer Service (Kf) APIs, use corpid + Kf Secret (Auth::WeCom)."
                     );
                 }
                 debug!(
-                    "请求公众平台 access_token（不包含密钥），appid 提示: {}",
+                    "Requesting Official Account / Mini Program access_token (no secrets), appid hint: {}",
                     appid_hint
                 );
                 self.request_token(url).await
@@ -189,7 +189,7 @@ impl KfClient {
                     qp.append_pair("corpid", corp_id);
                     qp.append_pair("corpsecret", corp_secret);
                 }
-                // 形态校验与安全日志（不输出密钥）
+                // Shape check and safe logging (no secrets)
                 let corp_id_hint = {
                     let id = corp_id.as_str();
                     if id.len() <= 4 {
@@ -200,11 +200,11 @@ impl KfClient {
                 };
                 if corp_id.starts_with("wx") {
                     warn!(
-                        "检测到 corpid 以 wx 开头，这通常是公众平台 appid；『微信客服』应使用 corpid（以 ww 开头）与微信客服 Secret。"
+                        "Detected corpid starting with 'wx' (likely an OA/MP appid). WeChat Customer Service should use corpid (starts with 'ww') with the Kf Secret."
                     );
                 }
                 debug!(
-                    "请求企业微信 access_token（不包含密钥），corpid 提示: {}",
+                    "Requesting WeCom (Kf) access_token (no secrets), corpid hint: {}",
                     corp_id_hint
                 );
                 self.request_token(url).await
@@ -213,7 +213,7 @@ impl KfClient {
     }
 
     async fn request_token(&self, url: Url) -> Result<AccessToken> {
-        // 在移动 url 进入请求之前先判断是否为企业微信接口
+        // Determine whether this is a WeCom endpoint before moving url into the request
         let is_wecom = url
             .host_str()
             .map(|h| h.contains("qyapi.weixin.qq.com"))
@@ -227,19 +227,21 @@ impl KfClient {
         match serde_json::from_slice::<TokenRawResp>(&bytes) {
             Ok(TokenRawResp::Ok(ok)) => Ok(ok),
             Ok(TokenRawResp::Err(err)) => {
-                // 为企业微信（微信客服）常见错误增加提示，避免混用 appid/appsecret 与 corpid/corpsecret
+                // Add hints for common WeCom (Kf) errors to avoid mixing appid/appsecret with corpid/corpsecret
                 let mut msg = err.errmsg.clone();
                 if is_wecom {
                     let hint = match err.errcode {
-                        40013 => "；提示：corpid 不正确，请确认使用以 ww 开头的企业ID",
+                        40013 => {
+                            "; hint: invalid corpid, ensure you are using a corpid that starts with 'ww'"
+                        }
                         40001 | 42001 => {
-                            "；提示：凭证无效或已过期，请检查 corpsecret 是否为『微信客服管理后台-开发配置』处获取，并实现缓存与过期刷新"
+                            "; hint: token invalid or expired; ensure corpsecret is the WeChat Customer Service Secret from the Admin Portal (Developer Config) and implement caching/refresh"
                         }
                         40014 | 40125 => {
-                            "；提示：secret 与 corpid 不匹配，避免误用公众号 appsecret"
+                            "; hint: secret does not match corpid; avoid using an OA/MP appsecret"
                         }
                         _ => {
-                            "；提示：请核对 corpid 与『微信客服』Secret 是否对应，勿使用公众平台的 appid/appsecret"
+                            "; hint: verify corpid matches the WeChat Customer Service Secret; do not use OA/MP appid/appsecret"
                         }
                     };
                     msg.push_str(hint);
@@ -250,7 +252,7 @@ impl KfClient {
                 })
             }
             Err(de_err) => {
-                // 解码失败时，尽量脱敏并截断 body，避免泄露 access_token 等敏感信息
+                // On decode failure, redact and truncate body when possible to avoid leaking sensitive data (e.g., access_token)
                 let mut body = String::from_utf8_lossy(&bytes).to_string();
                 if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&body) {
                     if let Some(obj) = v.as_object_mut() {
