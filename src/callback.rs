@@ -234,3 +234,62 @@ pub fn handle_callback_raw(
         }
     }
 }
+
+/// Convenience: verify-and-decrypt the GET echostr (encrypted echo) used for URL verification.
+/// - token: callback Token
+/// - encoding_aes_key: 43-char EncodingAESKey
+/// - timestamp, nonce, msg_signature: query parameters
+/// - echostr: encrypted echo string from the query
+/// - expected_receiver_id: optional receiver id (e.g., corpid) to validate against decrypted tail
+pub fn verify_and_decrypt_echostr(
+    token: &str,
+    encoding_aes_key: &str,
+    timestamp: &str,
+    nonce: &str,
+    msg_signature: &str,
+    echostr: &str,
+    expected_receiver_id: Option<&str>,
+) -> Result<String, CallbackError> {
+    if !verify_msg_signature(token, timestamp, nonce, echostr, msg_signature) {
+        return Err(CallbackError::SignatureMismatch);
+    }
+    decrypt_b64_message(encoding_aes_key, echostr, expected_receiver_id)
+}
+
+/// Convenience: verify-and-decrypt a POST callback body (XML/JSON wrapper).
+/// This is a thin wrapper around `handle_callback_raw`.
+pub fn verify_and_decrypt_post_body(
+    token: &str,
+    encoding_aes_key: &str,
+    timestamp: &str,
+    nonce: &str,
+    msg_signature: &str,
+    body: &str,
+    expected_receiver_id: Option<&str>,
+) -> Result<String, CallbackError> {
+    handle_callback_raw(
+        token,
+        encoding_aes_key,
+        timestamp,
+        nonce,
+        msg_signature,
+        body,
+        expected_receiver_id,
+    )
+}
+
+/// Optional helper for OA-style unencrypted URL verification:
+/// returns `echostr` if signature matches; otherwise `SignatureMismatch`.
+pub fn verify_plain_url_echostr(
+    token: &str,
+    timestamp: &str,
+    nonce: &str,
+    signature: &str,
+    echostr: &str,
+) -> Result<String, CallbackError> {
+    if verify_url_signature(token, timestamp, nonce, signature) {
+        Ok(echostr.to_string())
+    } else {
+        Err(CallbackError::SignatureMismatch)
+    }
+}

@@ -29,5 +29,5 @@ cipher = "0.4"
 sha1 = "0.10"
 base64 = "0.22"
 
-# Server framework for callback handling
+[dev-dependencies]
 axum = { version = "0.8", features = ["json"] }
