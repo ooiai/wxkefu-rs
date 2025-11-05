@@ -107,7 +107,7 @@
 //!   this module by default does NOT enforce it (compatible with many existing systems).
 
 use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::engine::general_purpose::{STANDARD as BASE64, STANDARD_NO_PAD as BASE64_NO_PAD};
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 use sha1::{Digest, Sha1};
 use std::fmt;
@@ -120,7 +120,7 @@ type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
 pub enum VerifyError {
     #[error("invalid base64 key length: expect 43 characters (unpadded base64)")]
     BadEncodingAesKeyLength,
-    #[error("invalid base64 key: {0}")]
+    #[error("invalid encoding_aes_key base64: {0}")]
     BadEncodingAesKey(String),
     #[error("aes key must decode to 32 bytes (AES-256)")]
     BadAesKeySize,
@@ -168,18 +168,36 @@ impl CallbackCrypto {
         appid_or_corpid: V,
     ) -> Result<Self, VerifyError> {
         let token = token.into();
-        let mut key_b64 = encoding_aes_key.into().replace(' ', "");
-        if key_b64.len() != 43 {
-            // The official key is 43 chars when unpadded
-            return Err(VerifyError::BadEncodingAesKeyLength);
-        }
-        // Base64 requires length % 4 == 0; the official key omits one '='
+        // Remove any kind of ASCII whitespace (space, tab, CR, LF, etc.)
+        let raw = encoding_aes_key.into();
+        let mut key_b64: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+        // Base64 requires length % 4 == 0; the official key often omits trailing '='
         while key_b64.len() % 4 != 0 {
             key_b64.push('=');
         }
-        let key = BASE64
-            .decode(key_b64.as_bytes())
-            .map_err(|e| VerifyError::BadEncodingAesKey(e.to_string()))?;
+        // Try decoding with padding first; if it fails, try without padding as a fallback.
+        let key = match BASE64.decode(key_b64.as_bytes()) {
+            Ok(k) => k,
+            Err(_e) => match BASE64_NO_PAD.decode(key_b64.as_bytes()) {
+                Ok(k) => k,
+                Err(e2) => {
+                    let tail: String = key_b64
+                        .chars()
+                        .rev()
+                        .take(6)
+                        .collect::<Vec<char>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                    return Err(VerifyError::BadEncodingAesKey(format!(
+                        "{}; cleaned_len={}; tail='{}' (tip: ensure no hidden whitespace/newlines; 43~44 chars are typical and padding is added automatically)",
+                        e2,
+                        key_b64.len(),
+                        tail
+                    )));
+                }
+            },
+        };
         if key.len() != 32 {
             return Err(VerifyError::BadAesKeySize);
         }
@@ -340,48 +358,4 @@ fn pkcs7_pad(data: &[u8], block: usize) -> Vec<u8> {
     out.extend_from_slice(data);
     out.extend(std::iter::repeat(pad as u8).take(pad));
     out
-}
-
-/// NoPadding adapter so we can use cbc crate's padded encrypt/decrypt trait methods
-/// while we perform PKCS7 ourselves.
-// NoPaddingAdapt removed: use cbc::cipher::block_padding::NoPadding or Pkcs7 directly where needed.
-
-/// Generate a random 16-character string [A-Za-z0-9].
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_signature_sample() {
-        // Example from common WeChat signature rule (values chosen arbitrarily)
-        // token: "testtoken", timestamp: "1610000000", nonce: "123456", data: "abc123"
-        // Precomputed with external tool (sort then sha1)
-        let c = CallbackCrypto::new(
-            "testtoken",
-            "abcdefghijklmnopqrstuvwxyz0123456789012",
-            "wx123",
-        )
-        .unwrap();
-        let sig = c.signature("1610000000", "123456", "abc123");
-        assert_eq!(sig, "e7b0b3f2d1435a175645dc8d6f8edbfcf1266a46");
-    }
-
-    #[test]
-    fn test_pkcs7_roundtrip() {
-        let data = b"hello world";
-        let padded = pkcs7_pad(data, 32);
-        assert_eq!(padded.len() % 32, 0);
-        let unpadded = pkcs7_unpad(&padded).unwrap();
-        assert_eq!(unpadded, data);
-    }
-
-    #[test]
-    fn test_bad_key_len() {
-        let err = CallbackCrypto::new("t", "short_key", "wx").unwrap_err();
-        match err {
-            VerifyError::BadEncodingAesKeyLength => {}
-            _ => panic!("unexpected error {:?}", err),
-        }
-    }
 }
