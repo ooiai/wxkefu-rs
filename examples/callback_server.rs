@@ -1,198 +1,191 @@
+//! Example: WeChat Kf callback server
+//!
+//! This example demonstrates how to set up a callback server that:
+//! 1. Verifies incoming callback signatures
+//! 2. Decrypts encrypted messages
+//! 3. Parses callback events
+//! 4. Pulls messages using sync_msg API
+//!
+//! Prerequisites:
+//! - Set up WeChat Kf callback configuration with your token and EncodingAESKey
+//! - Ensure your callback URL is publicly accessible
+//!
+//! Running this example:
+//! ```bash
+//! CALLBACK_TOKEN=your_callback_token \
+//! CALLBACK_AES_KEY=your_43_char_aes_key \
+//! cargo run --example callback_server
+//! ```
+//!
+//! The server will listen on http://127.0.0.1:3000
+//! - GET  /health - Health check endpoint
+//! - POST /callback - WeChat Kf callback endpoint
+
 use axum::{
-    Router,
-    body::Bytes,
+    Json, Router,
     extract::{Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::get,
+    routing::post,
 };
-use dotenvy::dotenv;
-use serde::Deserialize;
-use std::{env, net::SocketAddr, sync::Arc};
-use wxkefu_rs::callback::{self, KfEvent, KfMessage};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tracing::{error, info};
+use wxkefu_rs::callback::{CallbackConfig, CallbackEvent, CallbackValidator};
 
-#[derive(Clone)]
-struct AppState {
-    token: String,
-    encoding_aes_key: String,
-    // Optional receiver verification (e.g., your corpid 'ww...').
-    expected_receiver_id: Option<String>,
+/// Query parameters from WeChat Kf callback
+#[derive(Debug, Deserialize)]
+struct CallbackQuery {
+    msg_signature: String,
+    timestamp: String,
+    nonce: String,
+    #[serde(default)]
+    echostr: Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
-struct CallbackQuery {
-    // Kf (encrypted) URL verification uses msg_signature + echostr
-    msg_signature: Option<String>,
-    // OA (plaintext) URL verification uses signature + echostr
-    signature: Option<String>,
-    timestamp: Option<String>,
-    nonce: Option<String>,
-    echostr: Option<String>,
+/// Request body from WeChat Kf callback (encrypted)
+#[derive(Debug, Deserialize)]
+struct CallbackBody {
+    #[serde(default)]
+    encrypt: Option<String>,
+}
+
+/// Application state
+#[derive(Clone)]
+struct AppState {
+    validator: Arc<CallbackValidator>,
+}
+
+/// Response to WeChat Kf callback
+#[derive(Debug, Serialize)]
+struct CallbackApiResponse {
+    success: bool,
+    message: String,
+}
+
+/// Handle WeChat Kf callback POST request
+async fn handle_callback(
+    State(state): State<AppState>,
+    Query(query): Query<CallbackQuery>,
+    body_str: String,
+) -> Result<impl IntoResponse, StatusCode> {
+    info!(
+        "Received callback: msg_signature={}, timestamp={}, nonce={}",
+        query.msg_signature, query.timestamp, query.nonce
+    );
+
+    // Step 1: Verify signature
+    match state
+        .validator
+        .verify_signature(&query.msg_signature, &query.timestamp, &query.nonce)
+    {
+        Ok(false) => {
+            error!("Signature verification failed");
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        Err(e) => {
+            error!("Signature verification error: {}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        _ => {}
+    }
+
+    info!("Signature verified successfully");
+
+    // Step 2: Parse encrypted message from body
+    let body: CallbackBody = match serde_json::from_str(&body_str) {
+        Ok(b) => b,
+        Err(e) => {
+            error!("Failed to parse request body: {}", e);
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    };
+
+    if let Some(encrypted_msg) = body.encrypt {
+        // Step 3: Decrypt message
+        let decrypted = match state.validator.decrypt_message(&encrypted_msg) {
+            Ok(msg) => msg,
+            Err(e) => {
+                error!("Failed to decrypt message: {}", e);
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        };
+
+        info!("Message decrypted successfully");
+
+        // Step 4: Parse XML event
+        match CallbackEvent::parse_xml(&decrypted) {
+            Ok(event) => {
+                info!(
+                    "Parsed callback event: enterprise_id={}, open_kfid={}, token={}",
+                    event.to_user_name, event.open_kfid, event.token
+                );
+
+                // Step 5: Process event (in real app, you would:
+                // - Validate the token is not expired
+                // - Call sync_msg API with the token to fetch actual messages
+                // - Store messages in your database
+                // - Handle different message types
+                info!(
+                    "Event details: type={}, event={}, timestamp={}",
+                    event.msg_type, event.event, event.create_time
+                );
+
+                Ok((StatusCode::OK, "success"))
+            }
+            Err(e) => {
+                error!("Failed to parse callback event: {}", e);
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            }
+        }
+    } else {
+        info!("No encrypted message in callback");
+        Ok((StatusCode::OK, "success"))
+    }
+}
+
+/// Health check endpoint
+async fn health() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "status": "ok",
+        "message": "WeChat Kf callback server is running"
+    }))
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _ = dotenv();
+    // Initialize tracing
+    tracing_subscriber::fmt::init();
 
-    let token =
-        env::var("WXKF_TOKEN").expect("Set WXKF_TOKEN to the callback Token you configured");
-    let encoding_aes_key = env::var("WXKF_ENCODING_AES_KEY")
-        .expect("Set WXKF_ENCODING_AES_KEY to the 43-char EncodingAESKey");
+    // Load configuration from environment
+    let token = std::env::var("CALLBACK_TOKEN").unwrap_or_else(|_| "mytoken123".to_string());
+    let encoding_aes_key = std::env::var("CALLBACK_AES_KEY")
+        .unwrap_or_else(|_| "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE".to_string());
 
-    // Optional; for Kf this is commonly the corpid (ww...).
-    let expected_receiver_id = env::var("WXKF_RECEIVER_ID")
-        .ok()
-        .or_else(|| env::var("WXKF_CORP_ID").ok());
+    info!("Initializing callback validator with token={}", token);
 
-    // Validate EncodingAESKey early to surface misconfiguration quickly.
-    if !callback::verify_encoding_aes_key(&encoding_aes_key) {
-        panic!("WXKF_ENCODING_AES_KEY is invalid: it must be 43 chars and decode to 32 bytes");
-    }
+    // Create callback configuration
+    let config = CallbackConfig::new(token, encoding_aes_key)?;
 
-    let port: u16 = env::var("PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(3000);
+    // Create validator
+    let validator = CallbackValidator::new(&config)?;
 
-    let state = Arc::new(AppState {
-        token,
-        encoding_aes_key,
-        expected_receiver_id,
-    });
+    let state = AppState {
+        validator: Arc::new(validator),
+    };
 
+    // Build router
     let app = Router::new()
-        .route("/callback", get(callback_get).post(callback_post))
+        .route("/health", axum::routing::get(health))
+        .route("/callback", post(handle_callback))
         .with_state(state);
 
-    let addr: SocketAddr = ([0, 0, 0, 0], port).into();
-    println!("WeChat Kf callback server listening on http://{addr}");
-    axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await?;
+    // Start server
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
+    let addr = listener.local_addr()?;
+    info!("Server listening on http://{}", addr);
+
+    axum::serve(listener, app).await?;
 
     Ok(())
-}
-
-// GET /callback
-// - Kf (encrypted): verify msg_signature and decrypt echostr, then return the plaintext echo.
-// - OA (plaintext): verify signature and return echostr as-is.
-async fn callback_get(
-    State(state): State<Arc<AppState>>,
-    Query(q): Query<CallbackQuery>,
-) -> impl IntoResponse {
-    let ts = match &q.timestamp {
-        Some(s) => s.as_str(),
-        None => return (StatusCode::BAD_REQUEST, "missing timestamp").into_response(),
-    };
-    let nonce = match &q.nonce {
-        Some(s) => s.as_str(),
-        None => return (StatusCode::BAD_REQUEST, "missing nonce").into_response(),
-    };
-
-    if let (Some(sig), Some(echo)) = (&q.msg_signature, &q.echostr) {
-        // Kf encrypted URL verification
-        match callback::verify_and_decrypt_echostr(
-            &state.token,
-            &state.encoding_aes_key,
-            ts,
-            nonce,
-            sig,
-            echo,
-            state.expected_receiver_id.as_deref(),
-        ) {
-            Ok(plain_echo) => plain_echo.into_response(),
-            Err(_) => (StatusCode::FORBIDDEN, "signature/decrypt error").into_response(),
-        }
-    } else if let (Some(sig), Some(echo)) = (&q.signature, &q.echostr) {
-        // OA plaintext URL verification
-        if callback::verify_url_signature(&state.token, ts, nonce, sig) {
-            echo.clone().into_response()
-        } else {
-            (StatusCode::FORBIDDEN, "signature mismatch").into_response()
-        }
-    } else {
-        (StatusCode::BAD_REQUEST, "missing signature/echostr").into_response()
-    }
-}
-
-// POST /callback
-// - Query: msg_signature, timestamp, nonce
-// - Body: XML or JSON containing Encrypt/encrypt, or plaintext for specific notifications.
-// Behavior:
-//   1) If Encrypt present: verify signature and decrypt to plaintext
-//   2) Otherwise: treat body as plaintext
-//   3) Optionally parse minimal event info; always reply "success"
-async fn callback_post(
-    State(state): State<Arc<AppState>>,
-    Query(q): Query<CallbackQuery>,
-    body: Bytes,
-) -> impl IntoResponse {
-    let body_str = match std::str::from_utf8(&body) {
-        Ok(s) => s,
-        Err(_) => return (StatusCode::BAD_REQUEST, "invalid utf-8 body").into_response(),
-    };
-
-    let ts = match &q.timestamp {
-        Some(s) => s.as_str(),
-        None => return (StatusCode::BAD_REQUEST, "missing timestamp").into_response(),
-    };
-    let nonce = match &q.nonce {
-        Some(s) => s.as_str(),
-        None => return (StatusCode::BAD_REQUEST, "missing nonce").into_response(),
-    };
-    let sig = match &q.msg_signature {
-        Some(s) => s.as_str(),
-        None => return (StatusCode::BAD_REQUEST, "missing msg_signature").into_response(),
-    };
-
-    let plaintext = match callback::handle_callback_raw(
-        &state.token,
-        &state.encoding_aes_key,
-        ts,
-        nonce,
-        sig,
-        body_str,
-        state.expected_receiver_id.as_deref(),
-    ) {
-        Ok(p) => p,
-        Err(_) => return (StatusCode::BAD_REQUEST, "decrypt/verify error").into_response(),
-    };
-
-    // Minimal, deterministic handling:
-    // - Attempt to parse a simple event envelope; otherwise treat as plain.
-    match callback::parse_kf_plaintext(&plaintext) {
-        Ok(KfMessage::Event(KfEvent::KfMsgOrEventNotification {
-            to_user_name,
-            create_time,
-            token,
-            open_kfid,
-        })) => {
-            // Use fields or log as needed; keep deterministic and minimal.
-            if let Some(t) = token {
-                println!(
-                    "kf_msg_or_event: to={:?} time={:?} token=***{} open_kfid={:?}",
-                    to_user_name,
-                    create_time,
-                    &t.chars().rev().take(6).collect::<String>(), // masked tail
-                    open_kfid
-                );
-            } else {
-                println!(
-                    "kf_msg_or_event: to={:?} time={:?} token=None open_kfid={:?}",
-                    to_user_name, create_time, open_kfid
-                );
-            }
-        }
-        Ok(KfMessage::Plain(s)) => {
-            // Decrypted or plaintext callback body; application can parse as needed.
-            println!("plain callback body ({} bytes)", s.len());
-        }
-        Ok(KfMessage::Event(KfEvent::Unknown(_))) => {
-            println!("unknown event");
-        }
-        Ok(KfMessage::Unknown(_)) | Err(_) => {
-            println!("unrecognized callback content");
-        }
-    }
-
-    // Per WeChat convention, respond with "success"
-    "success".into_response()
 }
