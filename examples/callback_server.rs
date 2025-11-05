@@ -268,6 +268,24 @@ async fn callback_post(
         }
     };
 
+    // Debug: log Encrypt field info from POST body before verify/decrypt
+    let enc_dbg = match callback::detect_format(body_str.as_bytes()) {
+        callback::CallbackFormat::Xml => callback::extract_encrypt_from_xml(body_str),
+        callback::CallbackFormat::Json => {
+            callback::extract_encrypt_from_json(body_str).ok().flatten()
+        }
+    };
+    match enc_dbg.as_deref() {
+        Some(enc) => {
+            let elen = enc.len();
+            let etail = if elen >= 4 { &enc[elen - 4..] } else { enc };
+            eprintln!("POST body Encrypt info: len={}, tail='{}'", elen, etail);
+        }
+        None => {
+            eprintln!("POST body Encrypt info: not found");
+        }
+    }
+
     let ts = match &q.timestamp {
         Some(s) => s.as_str(),
         None => {

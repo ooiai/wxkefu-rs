@@ -171,25 +171,107 @@ pub fn verify_msg_signature(
     false
 }
 
-/// Decode EncodingAESKey (43 chars).
-/// The AES key is base64(EncodingAESKey + "=") -> 32 bytes; iv is the first 16 bytes.
+/// Decode EncodingAESKey (tolerant).
+/// Tries multiple normalization strategies until a 32-byte key is obtained:
+/// - trim whitespace
+/// - try as-is, then append '=', '=='
+/// - map URL-safe base64 ('-'->'+', '_'->'/')
+/// - percent-decode variants
+/// Returns 32-byte key if any candidate decodes to 32 bytes; otherwise InvalidKey/Base64.
 fn decode_aes_key(encoding_aes_key: &str) -> Result<[u8; 32], CallbackError> {
-    let key_b64 = if encoding_aes_key.ends_with('=') {
-        encoding_aes_key.to_string()
+    fn urlsafe_to_std(s: &str) -> String {
+        s.replace('-', "+").replace('_', "/")
+    }
+    fn percent_decode(input: &str) -> Option<String> {
+        let b = input.as_bytes();
+        let mut out = Vec::with_capacity(b.len());
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'%' && i + 2 < b.len() {
+                let h1 = b[i + 1] as char;
+                let h2 = b[i + 2] as char;
+                let v1 = h1.to_digit(16)?;
+                let v2 = h2.to_digit(16)?;
+                out.push((v1 * 16 + v2) as u8);
+                i += 3;
+            } else {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8(out).ok()
+    }
+    fn pad_variants(s: &str) -> [String; 3] {
+        [s.to_string(), format!("{s}="), format!("{s}==")]
+    }
+
+    let s0 = encoding_aes_key.trim();
+
+    // Build base candidates
+    let mut bases: Vec<String> = Vec::new();
+    bases.push(s0.to_string());
+    bases.push(urlsafe_to_std(s0));
+    if let Some(dec) = percent_decode(s0) {
+        bases.push(dec.clone());
+        bases.push(urlsafe_to_std(&dec));
+    }
+
+    // Deduplicate bases
+    let mut uniq_bases: Vec<String> = Vec::new();
+    'outer: for b in bases {
+        for u in &uniq_bases {
+            if u == &b {
+                continue 'outer;
+            }
+        }
+        uniq_bases.push(b);
+    }
+
+    // Try each base with padding variants
+    let mut saw_decode_err = None::<String>;
+    for b in uniq_bases {
+        for cand in &pad_variants(&b) {
+            match BASE64.decode(cand.as_bytes()) {
+                Ok(bytes) => {
+                    if bytes.len() == 32 {
+                        let arr: [u8; 32] = bytes
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| CallbackError::InvalidKey)?;
+                        return Ok(arr);
+                    } else {
+                        // Try to smart-pad if not multiple of 4 and not 32 bytes
+                        let mut t = cand.clone();
+                        match t.len() % 4 {
+                            2 => t.push_str("=="),
+                            3 => t.push('='),
+                            1 => t.push_str("==="),
+                            _ => {}
+                        }
+                        if let Ok(bytes2) = BASE64.decode(t.as_bytes()) {
+                            if bytes2.len() == 32 {
+                                let arr: [u8; 32] = bytes2
+                                    .as_slice()
+                                    .try_into()
+                                    .map_err(|_| CallbackError::InvalidKey)?;
+                                return Ok(arr);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    saw_decode_err = Some(e.to_string());
+                    continue;
+                }
+            }
+        }
+    }
+
+    if let Some(e) = saw_decode_err {
+        Err(CallbackError::Base64(e))
     } else {
-        // The official key is 43 chars and needs one '=' padding
-        let mut s = encoding_aes_key.to_string();
-        s.push('=');
-        s
-    };
-    let key = BASE64
-        .decode(key_b64.as_bytes())
-        .map_err(|e| CallbackError::Base64(e.to_string()))?;
-    let arr: [u8; 32] = key
-        .as_slice()
-        .try_into()
-        .map_err(|_| CallbackError::InvalidKey)?;
-    Ok(arr)
+        Err(CallbackError::InvalidKey)
+    }
 }
 
 /// Decrypt base64-encoded ciphertext from the callback Encrypt field.
@@ -204,62 +286,131 @@ pub fn decrypt_b64_message(
     let key = decode_aes_key(encoding_aes_key)?;
     let iv = &key[..16];
 
-    // Normalize base64: handle URL-safe alphabet and common '+' vs ' ' issues, plus missing padding.
-    let normalized_b64 = {
-        let mut t = cipher_b64
-            .trim()
-            .replace(' ', "+")
-            .replace('-', "+")
-            .replace('_', "/");
-        match t.len() % 4 {
-            2 => t.push_str("=="),
-            3 => t.push('='),
-            1 => t.push_str("==="),
+    fn percent_decode(input: &str) -> Option<String> {
+        let b = input.as_bytes();
+        let mut out = Vec::with_capacity(b.len());
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'%' && i + 2 < b.len() {
+                let h1 = b[i + 1] as char;
+                let h2 = b[i + 2] as char;
+                let v1 = h1.to_digit(16)?;
+                let v2 = h2.to_digit(16)?;
+                out.push((v1 * 16 + v2) as u8);
+                i += 3;
+            } else {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8(out).ok()
+    }
+    fn urlsafe_to_std(s: &str) -> String {
+        s.replace('-', "+").replace('_', "/")
+    }
+    fn pad_b64(mut s: String) -> String {
+        match s.len() % 4 {
+            2 => s.push_str("=="),
+            3 => s.push('='),
+            1 => s.push_str("==="),
             _ => {}
         }
-        t
-    };
-    let cipher_bytes = BASE64
-        .decode(normalized_b64.as_bytes())
-        .map_err(|e| CallbackError::Base64(e.to_string()))?;
-
-    let mut buf = cipher_bytes.clone();
-    let plaintext = Aes256CbcDec::new_from_slices(&key, iv)
-        .map_err(|_| CallbackError::InvalidKey)?
-        .decrypt_padded_mut::<Pkcs7>(&mut buf)
-        .map_err(|_| CallbackError::Crypto)?
-        .to_vec();
-
-    if plaintext.len() < 20 {
-        return Err(CallbackError::BadFormat);
+        s
     }
 
-    // Skip 16-byte random
-    let content = &plaintext[16..];
-    if content.len() < 4 {
-        return Err(CallbackError::BadFormat);
+    // Build normalization candidates in a liberal order.
+    let base = cipher_b64.to_string();
+    let mut candidates: Vec<String> = vec![
+        base.clone(),
+        base.trim().to_string(),
+        base.replace(' ', "+"),
+        urlsafe_to_std(&base),
+        urlsafe_to_std(&base.trim().to_string()),
+        urlsafe_to_std(&base.replace(' ', "+")),
+    ];
+    if let Some(dec) = percent_decode(&base) {
+        candidates.push(dec.clone());
+        candidates.push(dec.replace(' ', "+"));
+        candidates.push(urlsafe_to_std(&dec));
+        candidates.push(urlsafe_to_std(&dec.replace(' ', "+")));
     }
 
-    // 4-byte BE length
-    let msg_len = u32::from_be_bytes([content[0], content[1], content[2], content[3]]) as usize;
-    if content.len() < 4 + msg_len {
-        return Err(CallbackError::BadFormat);
-    }
-
-    let msg = &content[4..4 + msg_len];
-    let receiver_id = &content[4 + msg_len..];
-
-    if let Some(expect) = expected_receiver_id {
-        let recv =
-            std::str::from_utf8(receiver_id).map_err(|e| CallbackError::Utf8(e.to_string()))?;
-        if recv != expect {
-            return Err(CallbackError::BadFormat);
+    // Deduplicate candidates
+    let mut uniq: Vec<String> = Vec::new();
+    'outer: for c in candidates {
+        for u in &uniq {
+            if u == &c {
+                continue 'outer;
+            }
         }
+        uniq.push(c);
     }
 
-    let msg_str =
-        String::from_utf8(msg.to_vec()).map_err(|e| CallbackError::Utf8(e.to_string()))?;
-    Ok(msg_str)
+    let mut saw_decode_ok = false;
+    let mut saw_decrypt_ok = false;
+
+    for cand in uniq {
+        let padded = pad_b64(cand);
+        let cipher_bytes = match BASE64.decode(padded.as_bytes()) {
+            Ok(b) => {
+                saw_decode_ok = true;
+                b
+            }
+            Err(_) => continue,
+        };
+
+        let mut buf = cipher_bytes.clone();
+        let plaintext = match Aes256CbcDec::new_from_slices(&key, iv)
+            .map_err(|_| CallbackError::InvalidKey)?
+            .decrypt_padded_mut::<Pkcs7>(&mut buf)
+        {
+            Ok(p) => {
+                saw_decrypt_ok = true;
+                p.to_vec()
+            }
+            Err(_) => continue,
+        };
+
+        if plaintext.len() < 20 {
+            continue;
+        }
+        let content = &plaintext[16..];
+        if content.len() < 4 {
+            continue;
+        }
+
+        let msg_len = u32::from_be_bytes([content[0], content[1], content[2], content[3]]) as usize;
+        if content.len() < 4 + msg_len {
+            continue;
+        }
+
+        let msg = &content[4..4 + msg_len];
+        let receiver_id = &content[4 + msg_len..];
+
+        if let Some(expect) = expected_receiver_id {
+            if let Ok(recv) = std::str::from_utf8(receiver_id) {
+                if recv != expect {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        }
+
+        let msg_str = match String::from_utf8(msg.to_vec()) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        return Ok(msg_str);
+    }
+
+    if saw_decode_ok && saw_decrypt_ok {
+        Err(CallbackError::BadFormat)
+    } else if saw_decode_ok {
+        Err(CallbackError::Crypto)
+    } else {
+        Err(CallbackError::Base64("no candidate decoded".to_string()))
+    }
 }
 
 /// Extract Encrypt field from an XML body (supports CDATA or plain text).
@@ -480,6 +631,14 @@ pub fn verify_encoding_aes_key(key: &str) -> bool {
         Ok(bytes) => bytes.len() == 32,
         Err(_) => false,
     }
+}
+
+/// Derive raw AES key and IV (first 16 bytes of key) from EncodingAESKey.
+pub fn derive_key_iv(encoding_aes_key: &str) -> Result<([u8; 32], [u8; 16]), CallbackError> {
+    let key = decode_aes_key(encoding_aes_key)?;
+    let mut iv = [0u8; 16];
+    iv.copy_from_slice(&key[..16]);
+    Ok((key, iv))
 }
 
 /// Typed message models for Kf plaintext (JSON or XML).
