@@ -99,11 +99,21 @@ async fn callback_get(
 
     if let (Some(sig), Some(echo)) = (&q.msg_signature, &q.echostr) {
         // Encrypted URL verification (WeCom/Kf)
-        if !callback::verify_msg_signature(&state.token, ts, nonce, echo, sig) {
-            return (StatusCode::FORBIDDEN, "signature mismatch").into_response();
-        }
-        match callback::decrypt_b64_message(
+        // Non-sensitive diagnostics: echo length and tail to help identify malformed inputs.
+        let elen = echo.len();
+        let etail = if elen >= 4 {
+            &echo[elen - 4..]
+        } else {
+            echo.as_str()
+        };
+        eprintln!("echo info: len={}, tail='{}'", elen, etail);
+        // Use shared helper which verifies signature and decrypts (handles URL-safe base64 and padding).
+        match callback::verify_and_decrypt_echostr(
+            &state.token,
             &state.encoding_aes_key,
+            ts,
+            nonce,
+            sig,
             echo,
             state.expected_receiver_id.as_deref(),
         ) {

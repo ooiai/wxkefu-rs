@@ -206,6 +206,52 @@ Run any example with cargo run --example <name>. Supply required environment var
 More examples:
 See the examples/ directory for all runnable samples.
 
+## Callback Setup
+
+Configure your callback service with three items: URL, Token, and EncodingAESKey.
+
+- URL: Your public callback endpoint (e.g., https://your.domain/callback). It must be reachable by WeChat Kf.
+- Token: Alphanumeric (letters/digits), length up to 32. Used for SHA1 signature verification. Only you and WeChat Kf know it; it never appears in transit.
+- EncodingAESKey: 43-character letters/digits only. Append a single '=' and Base64-decode to 32 bytes. Used to derive the AES-256 key (IV = first 16 bytes) for decrypting callback payloads.
+
+Generate Token and EncodingAESKey
+
+- Use the provided key generator example to produce values locally:
+  - Run: cargo run --example keygen_example
+  - TOKEN: random alphanumeric, default 32 chars
+  - ENCODING_AES_KEY: 43 chars, letters/digits only; verify by appending '=' and Base64-decoding to 32 bytes
+
+Set environment variables for the callback server (examples/callback_server.rs)
+
+- WXKF_TOKEN: TOKEN from the key generator
+- WXKF_ENCODING_AES_KEY: 43-char ENCODING_AES_KEY from the key generator
+- WXKF_CORP_ID (or WXKF_RECEIVER_ID): Optional but recommended; typically your corpid (ww...) to validate the decrypted receiver id tail
+- PORT: Optional, defaults to 3000
+
+URL verification (GET /callback)
+
+- WeCom/Kf sends msg_signature, timestamp, nonce, echostr (encrypted echo; Base64).
+- The server verifies signature with Token and decrypts echostr using EncodingAESKey, and returns the plaintext echo.
+- Important: echostr is provided by WeChat. Do not use your EncodingAESKey as echostr. If you see invalid base64 errors, ensure echostr is intact and not modified by proxies (e.g., plus signs must not become spaces).
+
+Message/event delivery (POST /callback)
+
+- Body contains Encrypt (XML or JSON wrapper). Query includes msg_signature, timestamp, nonce.
+- Steps:
+  1. Extract Encrypt
+  2. Verify signature with Token, timestamp, nonce, Encrypt
+  3. Decrypt using EncodingAESKey
+  4. Process the decrypted payload (for Kf, this is typically JSON)
+- For the kf_msg_or_event event, the decrypted JSON includes a short-lived token to call the kf/sync_msg API and an open_kfid that has new messages.
+
+Library notes
+
+- The callback helper normalizes Base64 to tolerate URL-safe alphabets and missing padding during decryption.
+- Helper functions:
+  - verify_and_decrypt_echostr(...) for GET verification
+  - handle_callback_raw(...) or verify_and_decrypt_post_body(...) for POST decryption
+- After decrypting kf_msg_or_event, call sync_msg with the short-lived token and paginate using next_cursor while has_more is true.
+
 ## Best Practices
 
 - Cache access_token (typical 7200s). Implement auto-refresh and handle early invalidation (errcode 40014/40001).

@@ -107,8 +107,19 @@ pub fn decrypt_b64_message(
     let key = decode_aes_key(encoding_aes_key)?;
     let iv = &key[..16];
 
+    // Normalize base64: handle URL-safe alphabet ('-' -> '+', '_' -> '/') and missing padding.
+    let normalized_b64 = {
+        let mut t = cipher_b64.trim().replace('-', "+").replace('_', "/");
+        match t.len() % 4 {
+            2 => t.push_str("=="),
+            3 => t.push('='),
+            1 => t.push_str("==="),
+            _ => {}
+        }
+        t
+    };
     let cipher_bytes = BASE64
-        .decode(cipher_b64.as_bytes())
+        .decode(normalized_b64.as_bytes())
         .map_err(|e| CallbackError::Base64(e.to_string()))?;
 
     let mut buf = cipher_bytes.clone();

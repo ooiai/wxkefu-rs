@@ -2,9 +2,9 @@
 //! Key generation utilities for WeChat Customer Service callbacks.
 //!
 //! This module provides functions to generate:
-//! - Token: an alphanumeric string (default 32 chars; max 64), used for SHA1 signature verification.
-//! - EncodingAESKey: a 43-character Base64 string (without padding) that decodes to 32 bytes when
-//!   appending a single '='. Used to derive the AES-256 key for decrypting callback messages.
+//! - Token: an alphanumeric string (default 32 chars; max 32), used for SHA1 signature verification.
+//! - EncodingAESKey: a 43-character Base64 string (letters/digits only, no padding) that decodes to 32 bytes
+//!   when appending a single '='. Used to derive the AES-256 key for decrypting callback messages.
 //!
 //! No external dependencies are used. Entropy is sourced from /dev/urandom when available,
 //! otherwise a best-effort pseudo-random generator is used. For production, prefer a proper CSPRNG.
@@ -13,11 +13,11 @@ use std::fs::File;
 use std::io::Read;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Generate an alphanumeric Token of given length (default 32; allowed 1..=64).
+/// Generate an alphanumeric Token of given length (default 32; allowed 1..=32).
 ///
 /// Returns a string consisting of [A-Za-z0-9].
 pub fn generate_token(len: usize) -> String {
-    let len = if len == 0 || len > 64 { 32 } else { len };
+    let len = if len == 0 || len > 32 { 32 } else { len };
     const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
     // Fill entropy and map bytes to alnum indices.
@@ -34,34 +34,18 @@ pub fn generate_token(len: usize) -> String {
 /// Generate a 43-character EncodingAESKey (Base64 without padding) derived from 32 random bytes.
 /// Appending a single '=' must decode back to 32 bytes.
 pub fn generate_encoding_aes_key() -> String {
-    // Generate 32 random bytes, Base64 encode (44 chars with '=' padding), then strip '=' -> 43 chars.
-    let mut key_bytes = [0u8; 32];
-    fill_entropy(&mut key_bytes);
+    // Generate until Base64 (without '=') is 43 chars and contains only [A-Za-z0-9],
+    // matching the official requirement for EncodingAESKey.
+    loop {
+        let mut key_bytes = [0u8; 32];
+        fill_entropy(&mut key_bytes);
 
-    let b64 = base64_encode(&key_bytes);
-    // Strip trailing '=' (for 32 bytes, standard Base64 encodes to 44 chars with one '=')
-    let trimmed = b64.trim_end_matches('=').to_string();
+        let b64 = base64_encode(&key_bytes);
+        let trimmed = b64.trim_end_matches('=').to_string();
 
-    // Guarantee length correctness; if not, fall back to re-encoding without '='
-    if trimmed.len() == 43 {
-        trimmed
-    } else {
-        // In unexpected cases, adjust: remove only the final '=' if present.
-        let mut s = b64;
-        while s.ends_with('=') && s.len() > 43 {
-            s.pop();
+        if trimmed.len() == 43 && trimmed.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return trimmed;
         }
-        if s.len() != 43 {
-            // As a last resort, truncate or pad with 'A' to reach length 43.
-            if s.len() > 43 {
-                s.truncate(43);
-            } else {
-                while s.len() < 43 {
-                    s.push('A');
-                }
-            }
-        }
-        s
     }
 }
 
@@ -240,11 +224,15 @@ mod tests {
 
     #[test]
     fn token_alnum_and_length() {
-        for &len in &[8usize, 16, 32, 64] {
+        for &len in &[8usize, 16, 32] {
             let t = generate_token(len);
             assert_eq!(t.len(), len);
             assert!(t.chars().all(|ch| ch.is_ascii_alphanumeric()));
         }
+        // length above max clamps to 32
+        let t = generate_token(64);
+        assert_eq!(t.len(), 32);
+        assert!(t.chars().all(|ch| ch.is_ascii_alphanumeric()));
         // length 0 defaults to 32
         let t = generate_token(0);
         assert_eq!(t.len(), 32);
@@ -274,11 +262,9 @@ mod tests {
     fn encoding_aes_key_is_base64_charset() {
         let key = generate_encoding_aes_key();
         assert_eq!(key.len(), 43);
-        // Ensure key only contains base64 characters (minus '=' which is not present by design)
+        // Ensure key only contains letters/digits (as required by official spec)
         assert!(key.bytes().all(|b| (b'A'..=b'Z').contains(&b)
             || (b'a'..=b'z').contains(&b)
-            || (b'0'..=b'9').contains(&b)
-            || b == b'+'
-            || b == b'/'));
+            || (b'0'..=b'9').contains(&b)));
     }
 }

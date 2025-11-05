@@ -147,6 +147,54 @@ async fn main() -> anyhow::Result<()> {
   - examples/account_more.rs（update/list/add_contact_way）
 - 更多案例请查看 examples 目录
 
+回调配置
+
+配置回调服务需要三个配置项：URL、Token、EncodingAESKey。
+
+- URL：你的公网回调地址（例如 https://your.domain/callback），必须可被微信客服服务器访问
+- Token：仅字母或数字，长度不超过 32，用于 SHA1 签名校验；仅你与微信客服后台知晓，不在传输中出现
+- EncodingAESKey：43 位字母数字字符串；在尾部追加一个“=”后 Base64 解码得到 32 字节密钥（IV 为密钥前 16 字节），用于回调消息的 AES-256-CBC 解密
+
+生成 Token 和 EncodingAESKey
+
+- 运行示例生成：cargo run --example keygen_example
+  - TOKEN：默认 32 位字母数字
+  - ENCODING_AES_KEY：43 位字母数字；可通过在末尾追加“=”并 Base64 解码校验应为 32 字节
+- 将生成结果用于回调服务器与管理后台配置
+
+为回调服务设置环境变量（examples/callback_server.rs）
+
+- WXKF_TOKEN：使用上一步生成的 TOKEN
+- WXKF_ENCODING_AES_KEY：使用上一步生成的 ENCODING_AES_KEY（43 位）
+- WXKF_CORP_ID 或 WXKF_RECEIVER_ID：可选但推荐，一般为 corpid（ww...），用于校验解密明文尾部的 receiver id
+- PORT：可选，默认 3000
+
+URL 验证（GET /callback）
+
+- WeCom/Kf 会携带 msg_signature、timestamp、nonce、echostr（加密回声，Base64）
+- 服务端需使用 Token 校验签名，并用 EncodingAESKey 解密 echostr，返回解密后的明文回声
+- 注意：
+  - echostr 由微信下发，请勿自行构造（更不要把 EncodingAESKey 当作 echostr）
+  - 若经过代理/CDN 导致 Base64 被改写（如 “+” 被替换为空格），需确保未被改写；本库在解密时对 URL-safe Base64 和缺失 padding 做了归一化处理，但空格等仍会破坏解码
+
+消息/事件推送（POST /callback）
+
+- 请求体为 XML 或 JSON 包裹的 Encrypt 字段；Query 中包含 msg_signature、timestamp、nonce
+- 处理流程：
+  1）提取 Encrypt
+  2）用 Token、timestamp、nonce、Encrypt 计算签名并校验
+  3）使用 EncodingAESKey 解密得到真实负载
+  4）处理解密出的消息/事件（Kf 通常为 JSON）
+- kf_msg_or_event 事件的解密 JSON 通常包含一个短期 token，用于调用 kf/sync_msg 拉取消息；拉取结果使用 next_cursor/has_more 分页直至拉取完毕
+
+库内说明与辅助函数
+
+- Base64 处理：解密时会对 URL-safe 字符（-/\_）与缺失 “=” padding 做归一化，提升兼容性
+- 辅助函数：
+  - verify_and_decrypt_echostr(...)：用于 GET 验证解密
+  - handle_callback_raw(...) / verify_and_decrypt_post_body(...)：用于 POST 解密与校验
+- 收到 kf_msg_or_event 后，请使用短期 token 调用 sync_msg，并根据 has_more/next_cursor 分页拉取
+
 示例：新增客服账号（头像需先上传临时素材获得 media_id）
 
 ```/dev/null/examples/account_add.rs#L1-40
