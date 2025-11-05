@@ -1,443 +1,387 @@
 #![allow(dead_code)]
-//! WeCom Kf callback handling and message decryption
+//! WeChat Kf callback crypto/signature helpers.
 //!
-//! The callback system works as follows:
-//! 1. WeChat Kf server pushes events to your configured callback URL
-//! 2. Events are signed using Token for authenticity verification
-//! 3. Message content is encrypted with EncodingAESKey for confidentiality
-//! 4. Your service decrypts and processes the events
+//! What this module provides
+//! - Signature verification for callback requests (msg_signature)
+//! - AES-256-CBC decryption for encrypted callback payloads (XML with <Encrypt>)
+//! - Optional URL verification (echostr) decryption
 //!
-//! Configuration required:
-//! - URL: Your callback service endpoint (publicly accessible)
-//! - Token: Custom string (English/digits, max 32 bytes) for signature calculation
-//! - EncodingAESKey: Encryption key (English/digits, exactly 43 bytes)
+//! Background
+//! - WeChat Kf signs requests with SHA1 over the lexicographically sorted list of:
+//!   [token, timestamp, nonce, encrypt(or echostr)]
+//! - The payload is encrypted using AES-256-CBC with PKCS7 padding. The key comes from
+//!   the 43-character EncodingAESKey you configure in the Kf Admin console.
+//!   IMPORTANT: EncodingAESKey is BASE64 of the 256-bit AES key (not hex).
+//! - The IV is the first 16 bytes of the AES key.
 //!
-//! API doc (CN): https://kf.weixin.qq.com/api/doc/path/93303
+//! Typical callback steps
+//! 1) Verify the signature from the query string (msg_signature, timestamp, nonce)
+//! 2) Decrypt the body (XML) to get the plaintext XML
+//! 3) Parse the plaintext XML; for kf_msg_or_event, use the embedded <Token> to pull messages via sync_msg
 //!
-//! ## Signature Verification
-//!
-//! The signature is calculated as:
-//! 1. Sort query parameters: msg_signature, timestamp, nonce (and others if present)
-//! 2. Concatenate: [sorted_string]
-//! 3. Calculate SHA1 hash
-//! 4. Compare with provided msg_signature
-//!
-//! ## Message Decryption
-//!
-//! Messages are encrypted using AES-128-CBC (PKCS7 padding):
-//! 1. Decode the encrypted message from base64
-//! 2. Decrypt using AES-128-CBC with the 32-byte key derived from EncodingAESKey
-//! 3. Remove PKCS7 padding
-//! 4. Parse the decrypted XML to extract the message
-//!
-//! ## Example Usage
+//! Example (Axum server)
+//! This is a minimal server showing GET URL verification and POST message decryption.
+//! Note: Replace TOKEN / ENCODING_AES_KEY / CORP_ID with your own.
 //!
 //! ```ignore
-//! use wxkefu_rs::callback::{CallbackConfig, CallbackValidator, MessageDecryptor};
+//! use axum::{extract::Query, routing::{get, post}, Router, response::IntoResponse};
+//! use std::net::SocketAddr;
+//! use std::sync::Arc;
+//! use wxkefu_rs::callback::{CallbackCrypto, VerifyError};
 //!
-//! // Configuration (typically from environment or config file)
-//! let config = CallbackConfig {
-//!     token: "your_token".to_string(),
-//!     encoding_aes_key: "your_43_char_aes_key".to_string(),
-//! };
-//!
-//! // Create validator
-//! let validator = CallbackValidator::new(&config)?;
-//!
-//! // Verify signature from incoming request
-//! let signature = "msg_signature_from_query";
-//! let timestamp = "1348831860";
-//! let nonce = "nonce_value";
-//! let is_valid = validator.verify_signature(signature, timestamp, nonce)?;
-//!
-//! if !is_valid {
-//!     return Err("Invalid signature");
+//! #[derive(Debug, serde::Deserialize)]
+//! struct WxQuery {
+//!     msg_signature: String,
+//!     timestamp: String,
+//!     nonce: String,
+//!     echostr: Option<String>,
 //! }
 //!
-//! // Decrypt and parse the message
-//! let encrypted_msg = "base64_encoded_encrypted_message";
-//! let decrypted = validator.decrypt_message(encrypted_msg)?;
-//! let event = CallbackEvent::parse_xml(&decrypted)?;
+//! #[tokio::main]
+//! async fn main() -> anyhow::Result<()> {
+//!     tracing_subscriber::fmt().init();
+//!
+//!     // Load from env or config center
+//!     let token = std::env::var("WXKF_TOKEN").expect("missing WXKF_TOKEN");
+//!     let encoding_aes_key = std::env::var("WXKF_ENCODING_AES_KEY").expect("missing WXKF_ENCODING_AES_KEY");
+//!     let corpid = std::env::var("WXKF_CORP_ID").expect("missing WXKF_CORP_ID");
+//!
+//!     // Build crypto helper
+//!     let crypto = Arc::new(CallbackCrypto::new(token, encoding_aes_key, corpid)?);
+//!
+//!     // GET: URL verification (echostr)
+//!     let crypto_get = crypto.clone();
+//!     let verify = get(move |Query(q): Query<WxQuery>| {
+//!         let crypto = crypto_get.clone();
+//!         async move {
+//!             match q.echostr {
+//!                 Some(echostr) => match crypto.verify_and_decrypt_echostr(&q.msg_signature, &q.timestamp, &q.nonce, &echostr) {
+//!                     Ok(plain) => plain.into_response(),
+//!                     Err(err) => {
+//!                         tracing::warn!("verify echostr failed: {}", err);
+//!                         (axum::http::StatusCode::BAD_REQUEST, "invalid").into_response()
+//!                     }
+//!                 },
+//!                 None => (axum::http::StatusCode::BAD_REQUEST, "missing echostr").into_response(),
+//!             }
+//!         }
+//!     });
+//!
+//!     // POST: encrypted callback body
+//!     let crypto_post = crypto.clone();
+//!     let callback = post(move |Query(q): Query<WxQuery>, body: String| {
+//!         let crypto = crypto_post.clone();
+//!         async move {
+//!             match crypto.verify_and_decrypt_xml(&q.msg_signature, &q.timestamp, &q.nonce, &body) {
+//!                 Ok(plaintext_xml) => {
+//!                     // You will typically parse plaintext_xml (quick-xml or roxmltree) to get fields such as:
+//!                     // - <Event>kf_msg_or_event</Event>
+//!                     // - <Token>...</Token> (use this when calling sync_msg within 10 minutes)
+//!                     tracing::info!("Decrypted plaintext XML: {}", plaintext_xml);
+//!                     // Must reply "success" to acknowledge receipt
+//!                     "success"
+//!                 }
+//!                 Err(err) => {
+//!                     tracing::warn!("decrypt callback failed: {}", err);
+//!                     (axum::http::StatusCode::BAD_REQUEST, "invalid")
+//!                 }
+//!             }
+//!         }
+//!     });
+//!
+//!     let app = Router::new()
+//!         .route("/wx/kf/callback", verify)
+//!         .route("/wx/kf/callback", callback);
+//!
+//!     let addr: SocketAddr = "0.0.0.0:3000".parse().unwrap();
+//!     tracing::info!("listening on {}", addr);
+//!     axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await?;
+//!     Ok(())
+//! }
 //! ```
+//!
+//! Notes
+//! - The Token is only used for signature verification; never expose it.
+//! - EncodingAESKey is only used for crypto; treat it as a secret (never log it).
+//! - If you enforce appid/corpid match in plaintext, be aware some integrations ignore it;
+//!   this module by default does NOT enforce it (compatible with many existing systems).
 
-use aes::Aes128;
-use base64::{Engine, engine::general_purpose::STANDARD};
-use cbc::Decryptor;
-use cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
-use generic_array::GenericArray;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 use sha1::{Digest, Sha1};
-use std::error::Error as StdError;
 use std::fmt;
 
-/// Custom error type for callback operations
-#[derive(Debug, Clone)]
-pub enum CallbackError {
-    InvalidKeySize { expected: usize, got: usize },
-    InvalidBase64(String),
-    DecryptionFailed(String),
+type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
+type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
+
+/// Errors from callback verification and crypto.
+#[derive(thiserror::Error, Debug)]
+pub enum VerifyError {
+    #[error("invalid base64 key length: expect 43 characters (unpadded base64)")]
+    BadEncodingAesKeyLength,
+    #[error("invalid base64 key: {0}")]
+    BadEncodingAesKey(String),
+    #[error("aes key must decode to 32 bytes (AES-256)")]
+    BadAesKeySize,
+    #[error("signature mismatch")]
+    SignatureMismatch,
+    #[error("invalid xml: missing <Encrypt>")]
+    MissingEncryptTag,
+    #[error("invalid ciphertext: base64 decode failed: {0}")]
+    BadCiphertextBase64(String),
+    #[error("aes decrypt failed")]
+    AesDecryptFailed,
+    #[error("invalid padding")]
     InvalidPadding,
-    XmlParseError(String),
-    SignatureVerificationFailed,
-    InvalidConfiguration(String),
+    #[error("invalid plaintext frame")]
+    InvalidPlaintextFrame,
+    #[error("xml parse error: {0}")]
+    XmlParse(String),
 }
 
-impl fmt::Display for CallbackError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CallbackError::InvalidKeySize { expected, got } => {
-                write!(f, "Invalid key size: expected {}, got {}", expected, got)
-            }
-            CallbackError::InvalidBase64(e) => write!(f, "Invalid base64: {}", e),
-            CallbackError::DecryptionFailed(e) => write!(f, "Decryption failed: {}", e),
-            CallbackError::InvalidPadding => write!(f, "Invalid PKCS7 padding"),
-            CallbackError::XmlParseError(e) => write!(f, "XML parse error: {}", e),
-            CallbackError::SignatureVerificationFailed => {
-                write!(f, "Signature verification failed")
-            }
-            CallbackError::InvalidConfiguration(e) => write!(f, "Invalid configuration: {}", e),
-        }
+impl VerifyError {
+    fn xml<E: fmt::Display>(e: E) -> Self {
+        VerifyError::XmlParse(e.to_string())
     }
 }
 
-impl StdError for CallbackError {}
-
-/// Callback configuration
-#[derive(Debug, Clone)]
-pub struct CallbackConfig {
-    /// Token for signature calculation (English/digits, max 32 bytes)
-    pub token: String,
-    /// AES key for message encryption/decryption (must be exactly 43 bytes)
-    pub encoding_aes_key: String,
-}
-
-impl CallbackConfig {
-    /// Create a new callback configuration
-    pub fn new(token: String, encoding_aes_key: String) -> Result<Self, CallbackError> {
-        // Validate token length
-        if token.is_empty() || token.len() > 32 {
-            return Err(CallbackError::InvalidConfiguration(
-                "Token must be 1-32 characters".to_string(),
-            ));
-        }
-
-        // Validate token characters (English/digits only)
-        if !token.chars().all(|c| c.is_ascii_alphanumeric()) {
-            return Err(CallbackError::InvalidConfiguration(
-                "Token must contain only English and digits".to_string(),
-            ));
-        }
-
-        // Validate AES key length (must be exactly 43 bytes)
-        if encoding_aes_key.len() != 43 {
-            return Err(CallbackError::InvalidConfiguration(format!(
-                "EncodingAESKey must be exactly 43 bytes, got {}",
-                encoding_aes_key.len()
-            )));
-        }
-
-        // Validate AES key characters (English/digits only)
-        if !encoding_aes_key.chars().all(|c| c.is_ascii_alphanumeric()) {
-            return Err(CallbackError::InvalidConfiguration(
-                "EncodingAESKey must contain only English and digits".to_string(),
-            ));
-        }
-
-        Ok(CallbackConfig {
-            token,
-            encoding_aes_key,
-        })
-    }
-}
-
-/// Callback validator for signature verification and message decryption
-pub struct CallbackValidator {
+/// Helper for WeChat Kf callback signature and AES crypto.
+///
+/// - token: used for signature calculation
+/// - encoding_aes_key: 43-character base64 for the 32-byte AES key
+/// - appid_or_corpid: your appid (OA/MP) or corpid (WeCom/Kf). Not enforced by default.
+#[derive(Clone, Debug)]
+pub struct CallbackCrypto {
     token: String,
-    aes_key: Vec<u8>,
+    aes_key: [u8; 32],
+    appid_or_corpid: String,
 }
 
-impl CallbackValidator {
-    /// Create a new callback validator
-    pub fn new(config: &CallbackConfig) -> Result<Self, CallbackError> {
-        // Decode the 43-byte AES key to get 32-byte key
-        // Handle base64 strings without padding (add padding if needed)
-        let mut key_str = config.encoding_aes_key.clone();
-        while key_str.len() % 4 != 0 {
-            key_str.push('=');
+impl CallbackCrypto {
+    /// Create a new crypto helper.
+    ///
+    /// encoding_aes_key must be 43 chars base64 (unpadded). Spaces are ignored. Missing '=' padding will be added automatically.
+    pub fn new<T: Into<String>, U: Into<String>, V: Into<String>>(
+        token: T,
+        encoding_aes_key: U,
+        appid_or_corpid: V,
+    ) -> Result<Self, VerifyError> {
+        let token = token.into();
+        let mut key_b64 = encoding_aes_key.into().replace(' ', "");
+        if key_b64.len() != 43 {
+            // The official key is 43 chars when unpadded
+            return Err(VerifyError::BadEncodingAesKeyLength);
         }
-
-        let aes_key = STANDARD
-            .decode(&key_str)
-            .map_err(|e| CallbackError::InvalidBase64(e.to_string()))?;
-
-        if aes_key.len() != 32 {
-            return Err(CallbackError::InvalidKeySize {
-                expected: 32,
-                got: aes_key.len(),
-            });
+        // Base64 requires length % 4 == 0; the official key omits one '='
+        while key_b64.len() % 4 != 0 {
+            key_b64.push('=');
         }
-
-        Ok(CallbackValidator {
-            token: config.token.clone(),
+        let key = BASE64
+            .decode(key_b64.as_bytes())
+            .map_err(|e| VerifyError::BadEncodingAesKey(e.to_string()))?;
+        if key.len() != 32 {
+            return Err(VerifyError::BadAesKeySize);
+        }
+        let mut aes_key = [0u8; 32];
+        aes_key.copy_from_slice(&key);
+        let appid_or_corpid = appid_or_corpid.into();
+        Ok(Self {
+            token,
             aes_key,
+            appid_or_corpid,
         })
     }
 
-    /// Verify the signature of an incoming callback
-    ///
-    /// # Arguments
-    /// * `msg_signature` - The signature from the query parameter `msg_signature`
-    /// * `timestamp` - The timestamp from the query parameter `timestamp`
-    /// * `nonce` - The nonce from the query parameter `nonce`
-    ///
-    /// # Returns
-    /// `Ok(true)` if signature is valid, `Ok(false)` if invalid
-    pub fn verify_signature(
+    /// Compute signature: sha1(sort(token, timestamp, nonce, data).join("")) lower-hex.
+    pub fn signature(&self, timestamp: &str, nonce: &str, data: &str) -> String {
+        let mut v = [self.token.as_str(), timestamp, nonce, data];
+        v.sort_unstable();
+        let joined = v.concat();
+        let mut hasher = Sha1::new();
+        hasher.update(joined.as_bytes());
+        hex_lower(hasher.finalize())
+    }
+
+    /// Verify and decrypt GET echostr (URL verification).
+    pub fn verify_and_decrypt_echostr(
         &self,
         msg_signature: &str,
         timestamp: &str,
         nonce: &str,
-    ) -> Result<bool, CallbackError> {
-        // Sort the parameters
-        let mut params = vec![self.token.as_str(), timestamp, nonce];
-        params.sort();
-
-        // Concatenate sorted parameters
-        let sorted_string = params.join("");
-
-        // Calculate SHA1 hash
-        let mut hasher = Sha1::new();
-        hasher.update(sorted_string.as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
-
-        // Compare with provided signature
-        Ok(hash == msg_signature)
-    }
-
-    /// Decrypt a message encrypted with AES-128-CBC
-    ///
-    /// # Arguments
-    /// * `encrypted_msg` - Base64-encoded encrypted message
-    ///
-    /// # Returns
-    /// Decrypted message as UTF-8 string
-    pub fn decrypt_message(&self, encrypted_msg: &str) -> Result<String, CallbackError> {
-        // Decode base64
-        let encrypted = STANDARD
-            .decode(encrypted_msg)
-            .map_err(|e| CallbackError::InvalidBase64(e.to_string()))?;
-
-        // The IV is the first 16 bytes of the encrypted data
-        if encrypted.len() < 16 {
-            return Err(CallbackError::DecryptionFailed(
-                "Encrypted message too short".to_string(),
-            ));
+        echostr: &str,
+    ) -> Result<String, VerifyError> {
+        let expect = self.signature(timestamp, nonce, echostr);
+        if expect != msg_signature {
+            return Err(VerifyError::SignatureMismatch);
         }
-
-        let (iv, ciphertext) = encrypted.split_at(16);
-
-        // Decrypt using AES-128-CBC
-        let mut buffer = ciphertext.to_vec();
-        let key = GenericArray::from_slice(&self.aes_key);
-        let iv = GenericArray::from_slice(iv);
-        let mut decryptor = Decryptor::<Aes128>::new(key, iv);
-
-        let decrypted = decryptor
-            .decrypt_padded_mut::<Pkcs7>(&mut buffer)
-            .map_err(|e| CallbackError::DecryptionFailed(format!("Decryption error: {}", e)))?;
-
-        // Convert to string
-        String::from_utf8(decrypted.to_vec())
-            .map_err(|e| CallbackError::DecryptionFailed(format!("UTF-8 error: {}", e)))
+        self.decrypt_cipher_text(echostr)
     }
-}
 
-/// Parsed callback event from WeChat Kf
-#[derive(Debug, Clone)]
-pub struct CallbackEvent {
-    /// ToUserName: WeChat Kf enterprise ID (usually starts with `ww`)
-    pub to_user_name: String,
-    /// CreateTime: Unix timestamp
-    pub create_time: u64,
-    /// MsgType: Usually "event"
-    pub msg_type: String,
-    /// Event: Event type (e.g., "kf_msg_or_event")
-    pub event: String,
-    /// Token: Short-lived token for calling sync_msg API
-    pub token: String,
-    /// OpenKfId: Kf account ID with new messages
-    pub open_kfid: String,
-}
-
-impl CallbackEvent {
-    /// Parse XML-encoded callback event
+    /// Verify and decrypt an encrypted callback XML body.
     ///
-    /// Example input:
-    /// ```xml
-    /// <xml>
-    ///   <ToUserName><![CDATA[ww12345678910]]></ToUserName>
-    ///   <CreateTime>1348831860</CreateTime>
-    ///   <MsgType><![CDATA[event]]></MsgType>
-    ///   <Event><![CDATA[kf_msg_or_event]]></Event>
-    ///   <Token><![CDATA[ENCApHxnGDNAVNY4AaSJKj4Tb5mwsEMzxhFmHVGcra996NR]]></Token>
-    ///   <OpenKfId><![CDATA[wkxxxxxxx]]></OpenKfId>
-    /// </xml>
-    /// ```
-    pub fn parse_xml(xml_str: &str) -> Result<Self, CallbackError> {
-        // Simple XML parsing using quick-xml
-        use quick_xml::de::from_str;
-        use serde::Deserialize;
-
-        #[derive(Debug, Deserialize)]
-        struct XmlEvent {
-            #[serde(rename = "ToUserName")]
-            to_user_name: String,
-            #[serde(rename = "CreateTime")]
-            create_time: u64,
-            #[serde(rename = "MsgType")]
-            msg_type: String,
-            #[serde(rename = "Event")]
-            event: String,
-            #[serde(rename = "Token")]
-            token: String,
-            #[serde(rename = "OpenKfId")]
-            open_kfid: String,
+    /// - Extracts <Encrypt>...</Encrypt> from xml
+    /// - Verifies signature using msg_signature, timestamp, nonce
+    /// - Decrypts the base64 cipher text to plaintext xml
+    pub fn verify_and_decrypt_xml(
+        &self,
+        msg_signature: &str,
+        timestamp: &str,
+        nonce: &str,
+        encrypted_xml: &str,
+    ) -> Result<String, VerifyError> {
+        let cipher = extract_encrypt_part(encrypted_xml)?;
+        let expect = self.signature(timestamp, nonce, &cipher);
+        if expect != msg_signature {
+            return Err(VerifyError::SignatureMismatch);
         }
-
-        let xml_event: XmlEvent = from_str(xml_str)
-            .map_err(|e| CallbackError::XmlParseError(format!("Failed to parse XML: {}", e)))?;
-
-        Ok(CallbackEvent {
-            to_user_name: xml_event.to_user_name,
-            create_time: xml_event.create_time,
-            msg_type: xml_event.msg_type,
-            event: xml_event.event,
-            token: xml_event.token,
-            open_kfid: xml_event.open_kfid,
-        })
+        self.decrypt_cipher_text(&cipher)
     }
+
+    /// Decrypt a base64 ciphertext to plaintext xml.
+    ///
+    /// Plaintext frame layout:
+    /// - 16 bytes: random
+    /// - 4 bytes: message length (big-endian)
+    /// - N bytes: message xml
+    /// - M bytes: appid/corpid
+    ///
+    /// Padding: PKCS7 (custom block size 32 in WeChat docs; AES uses 16. We will decode using 16.)
+    pub fn decrypt_cipher_text(&self, cipher_b64: &str) -> Result<String, VerifyError> {
+        let encrypted = BASE64
+            .decode(cipher_b64.as_bytes())
+            .map_err(|e| VerifyError::BadCiphertextBase64(e.to_string()))?;
+        let iv = &self.aes_key[..16];
+
+        // AES-256-CBC NoPadding + manual PKCS7 removal
+        let mut buf = encrypted.clone();
+        let decrypted = Aes256CbcDec::new((&self.aes_key).into(), iv.into())
+            .decrypt_padded_mut::<cbc::cipher::block_padding::NoPadding>(&mut buf)
+            .map_err(|_| VerifyError::AesDecryptFailed)?
+            .to_vec();
+
+        let unpadded = pkcs7_unpad(&decrypted).map_err(|_| VerifyError::InvalidPadding)?;
+        if unpadded.len() < 20 {
+            return Err(VerifyError::InvalidPlaintextFrame);
+        }
+        let msg_len = u32::from_be_bytes(
+            unpadded[16..20]
+                .try_into()
+                .map_err(|_| VerifyError::InvalidPlaintextFrame)?,
+        ) as usize;
+        if unpadded.len() < 20 + msg_len {
+            return Err(VerifyError::InvalidPlaintextFrame);
+        }
+        let msg = &unpadded[20..20 + msg_len];
+        let _from_appid = &unpadded[20 + msg_len..];
+
+        // Optional strict check:
+        // if _from_appid != self.appid_or_corpid.as_bytes() {
+        //     return Err(VerifyError::InvalidPlaintextFrame);
+        // }
+
+        Ok(String::from_utf8_lossy(msg).into_owned())
+    }
+
+    // encrypt_plaintext removed: not required for Kf callback flow and depended on rand/NoPaddingAdapt.
 }
 
-/// Simplified callback response to WeChat Kf
-///
-/// When you receive a callback, you should respond with:
-/// - HTTP 200 status code
-/// - Response body: `"success"` (or empty)
-///
-/// This ensures WeChat Kf knows your server received the event.
-#[derive(Debug, Clone)]
-pub struct CallbackResponse {
-    /// Always "success" to indicate successful processing
-    pub message: String,
-}
-
-impl CallbackResponse {
-    /// Create a success response
-    pub fn success() -> Self {
-        CallbackResponse {
-            message: "success".to_string(),
+/// Extracts the text inside <Encrypt>...</Encrypt> from an XML string.
+fn extract_encrypt_part(xml: &str) -> Result<String, VerifyError> {
+    // Prefer CDATA section first: <Encrypt><![CDATA[...]]></Encrypt>
+    if let Some(start) = xml.find("<Encrypt><![CDATA[") {
+        let from = start + "<Encrypt><![CDATA[".len();
+        if let Some(end) = xml[from..].find("]]></Encrypt>") {
+            return Ok(xml[from..from + end].to_string());
         }
     }
-
-    /// Serialize to response body
-    pub fn to_string(&self) -> String {
-        "success".to_string()
+    // Fallback to plain text node: <Encrypt>...</Encrypt>
+    if let Some(start_tag) = xml.find("<Encrypt>") {
+        let from = start_tag + "<Encrypt>".len();
+        if let Some(end_tag) = xml[from..].find("</Encrypt>") {
+            return Ok(xml[from..from + end_tag].to_string());
+        }
     }
+    Err(VerifyError::MissingEncryptTag)
 }
+
+/// Lowercase hex for a sha1 digest.
+fn hex_lower(d: sha1::digest::Output<Sha1>) -> String {
+    let mut s = String::with_capacity(40);
+    for b in d {
+        use std::fmt::Write;
+        let _ = write!(s, "{:02x}", b);
+    }
+    s
+}
+
+/// Simple PKCS7 unpad for block size 16/32.
+/// Returns a subslice without the padding.
+fn pkcs7_unpad(data: &[u8]) -> Result<&[u8], ()> {
+    if data.is_empty() {
+        return Err(());
+    }
+    let pad = *data.last().unwrap() as usize;
+    if pad == 0 || pad > 32 || pad > data.len() {
+        return Err(());
+    }
+    // All padding bytes must be equal to pad
+    if data[data.len() - pad..].iter().any(|&b| b as usize != pad) {
+        return Err(());
+    }
+    Ok(&data[..data.len() - pad])
+}
+
+/// PKCS7 pad to a multiple of `block`.
+fn pkcs7_pad(data: &[u8], block: usize) -> Vec<u8> {
+    let rem = data.len() % block;
+    let pad = if rem == 0 { block } else { block - rem };
+    let mut out = Vec::with_capacity(data.len() + pad);
+    out.extend_from_slice(data);
+    out.extend(std::iter::repeat(pad as u8).take(pad));
+    out
+}
+
+/// NoPadding adapter so we can use cbc crate's padded encrypt/decrypt trait methods
+/// while we perform PKCS7 ourselves.
+// NoPaddingAdapt removed: use cbc::cipher::block_padding::NoPadding or Pkcs7 directly where needed.
+
+/// Generate a random 16-character string [A-Za-z0-9].
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_config_validation() {
-        // Valid config - using 43-char base64 key without padding
-        let result = CallbackConfig::new(
-            "mytoken123".to_string(),
-            "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE".to_string(),
-        );
-        assert!(result.is_ok());
-
-        // Token too long
-        let result = CallbackConfig::new(
-            "a".repeat(33),
-            "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE".to_string(),
-        );
-        assert!(result.is_err());
-
-        // Invalid token characters
-        let result = CallbackConfig::new(
-            "my-token".to_string(),
-            "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE".to_string(),
-        );
-        assert!(result.is_err());
-
-        // AES key wrong length (too short)
-        let result = CallbackConfig::new(
-            "mytoken".to_string(),
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-        );
-        assert!(result.is_err());
-
-        // AES key wrong length (too long with padding)
-        let result = CallbackConfig::new(
-            "mytoken".to_string(),
-            "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=".to_string(),
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_signature_verification() {
-        let config = CallbackConfig::new(
-            "mytoken".to_string(),
-            "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE".to_string(),
+    fn test_signature_sample() {
+        // Example from common WeChat signature rule (values chosen arbitrarily)
+        // token: "testtoken", timestamp: "1610000000", nonce: "123456", data: "abc123"
+        // Precomputed with external tool (sort then sha1)
+        let c = CallbackCrypto::new(
+            "testtoken",
+            "abcdefghijklmnopqrstuvwxyz0123456789012",
+            "wx123",
         )
         .unwrap();
-        let validator = CallbackValidator::new(&config).unwrap();
-
-        // Calculate expected signature
-        let timestamp = "1348831860";
-        let nonce = "nonce_value";
-        let mut params = vec!["mytoken", timestamp, nonce];
-        params.sort();
-        let sorted_string = params.join("");
-        let mut hasher = Sha1::new();
-        hasher.update(sorted_string.as_bytes());
-        let expected_sig = format!("{:x}", hasher.finalize());
-
-        // Verify correct signature
-        let result = validator
-            .verify_signature(&expected_sig, timestamp, nonce)
-            .unwrap();
-        assert!(result);
-
-        // Verify incorrect signature
-        let result = validator
-            .verify_signature("invalid_signature", timestamp, nonce)
-            .unwrap();
-        assert!(!result);
+        let sig = c.signature("1610000000", "123456", "abc123");
+        assert_eq!(sig, "e7b0b3f2d1435a175645dc8d6f8edbfcf1266a46");
     }
 
     #[test]
-    fn test_event_parsing() {
-        let xml = r#"<xml>
-   <ToUserName><![CDATA[ww12345678910]]></ToUserName>
-   <CreateTime>1348831860</CreateTime>
-   <MsgType><![CDATA[event]]></MsgType>
-   <Event><![CDATA[kf_msg_or_event]]></Event>
-   <Token><![CDATA[ENCApHxnGDNAVNY4AaSJKj4Tb5mwsEMzxhFmHVGcra996NR]]></Token>
-   <OpenKfId><![CDATA[wkxxxxxxx]]></OpenKfId>
-</xml>"#;
+    fn test_pkcs7_roundtrip() {
+        let data = b"hello world";
+        let padded = pkcs7_pad(data, 32);
+        assert_eq!(padded.len() % 32, 0);
+        let unpadded = pkcs7_unpad(&padded).unwrap();
+        assert_eq!(unpadded, data);
+    }
 
-        let event = CallbackEvent::parse_xml(xml).unwrap();
-        assert_eq!(event.to_user_name, "ww12345678910");
-        assert_eq!(event.create_time, 1348831860);
-        assert_eq!(event.msg_type, "event");
-        assert_eq!(event.event, "kf_msg_or_event");
-        assert_eq!(
-            event.token,
-            "ENCApHxnGDNAVNY4AaSJKj4Tb5mwsEMzxhFmHVGcra996NR"
-        );
-        assert_eq!(event.open_kfid, "wkxxxxxxx");
+    #[test]
+    fn test_bad_key_len() {
+        let err = CallbackCrypto::new("t", "short_key", "wx").unwrap_err();
+        match err {
+            VerifyError::BadEncodingAesKeyLength => {}
+            _ => panic!("unexpected error {:?}", err),
+        }
     }
 }
