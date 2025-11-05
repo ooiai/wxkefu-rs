@@ -8,23 +8,15 @@ Run:
 use wxkefu_rs::keygen::{generate_encoding_aes_key, generate_token, verify_encoding_aes_key};
 
 fn main() {
-    // Generate an alphanumeric Token (default 32 characters)
+    // 生成 Token（32 字符，字母数字）
     let token = generate_token(32);
+    println!("Token: {}", token);
 
-    // Generate a 43-character EncodingAESKey (Base64 without '=' padding)
+    // 生成 EncodingAESKey（43 字符，字母数字）
     let encoding_aes_key = generate_encoding_aes_key();
+    println!("EncodingAESKey: {}", encoding_aes_key);
 
-    // Verify that EncodingAESKey decodes to 32 bytes when appending '='
+    // 校验 EncodingAESKey 是否合法（43 长度，补 '=' 后可解码为 32 字节）
     let ok = verify_encoding_aes_key(&encoding_aes_key);
-
-    println!("TOKEN={}", token);
-    println!("ENCODING_AES_KEY={}", encoding_aes_key);
-    println!("VERIFY={}", if ok { "OK" } else { "INVALID" });
-
-    // Notes:
-    // - Keep TOKEN and ENCODING_AES_KEY secret; do not commit or log them in production.
-    // - In your callback server:
-    //     * Use TOKEN for SHA1 signature verification.
-    //     * Use ENCODING_AES_KEY (append '=' then Base64 decode) to derive the 32-byte AES key
-    //       (IV is the first 16 bytes of the decoded key) for decrypting messages.
+    println!("EncodingAESKey valid? {}", ok);
 }
