@@ -89,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
 
         match resp {
             Ok(ok) => {
+                println!("resp:{:?}", ok);
                 println!(
                     "resp: errcode={}, errmsg={}, has_more={}, next_cursor={:?}, msg_count={}",
                     ok.errcode,
