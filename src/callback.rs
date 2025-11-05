@@ -57,12 +57,34 @@ pub fn sha1_signature(parts: &[&str]) -> String {
 }
 
 /// Verify URL signature (no encrypt parameter).
+///
+/// Accept both sorted and concatenated forms to be tolerant to edge transports.
 pub fn verify_url_signature(token: &str, timestamp: &str, nonce: &str, signature: &str) -> bool {
-    let calc = sha1_signature(&[token, timestamp, nonce]);
-    calc.eq_ignore_ascii_case(signature)
+    let calc_sorted = sha1_signature(&[token, timestamp, nonce]);
+    let calc_concat = sha1_signature_concat(&[token, timestamp, nonce]);
+    calc_sorted.eq_ignore_ascii_case(signature) || calc_concat.eq_ignore_ascii_case(signature)
+}
+
+/// Compute SHA1 signature by concatenating parts in the given order (no sorting).
+pub fn sha1_signature_concat(parts: &[&str]) -> String {
+    let mut hasher = Sha1::new();
+    for p in parts {
+        hasher.update(p.as_bytes());
+    }
+    let digest = hasher.finalize();
+    // lowercase hex
+    let mut s = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        use core::fmt::Write;
+        let _ = write!(&mut s, "{:02x}", b);
+    }
+    s
 }
 
 /// Verify message signature (includes encrypt parameter).
+///
+/// Accept both sorted and concatenated forms; also normalize encrypt by treating spaces as '+'
+/// to tolerate proxies that turned '+' into ' '.
 pub fn verify_msg_signature(
     token: &str,
     timestamp: &str,
@@ -70,8 +92,10 @@ pub fn verify_msg_signature(
     encrypt: &str,
     signature: &str,
 ) -> bool {
-    let calc = sha1_signature(&[token, timestamp, nonce, encrypt]);
-    calc.eq_ignore_ascii_case(signature)
+    let encrypt_norm = encrypt.replace(' ', "+");
+    let calc_sorted = sha1_signature(&[token, timestamp, nonce, &encrypt_norm]);
+    let calc_concat = sha1_signature_concat(&[token, timestamp, nonce, &encrypt_norm]);
+    calc_sorted.eq_ignore_ascii_case(signature) || calc_concat.eq_ignore_ascii_case(signature)
 }
 
 /// Decode EncodingAESKey (43 chars).
@@ -107,9 +131,13 @@ pub fn decrypt_b64_message(
     let key = decode_aes_key(encoding_aes_key)?;
     let iv = &key[..16];
 
-    // Normalize base64: handle URL-safe alphabet ('-' -> '+', '_' -> '/') and missing padding.
+    // Normalize base64: handle URL-safe alphabet and common '+' vs ' ' issues, plus missing padding.
     let normalized_b64 = {
-        let mut t = cipher_b64.trim().replace('-', "+").replace('_', "/");
+        let mut t = cipher_b64
+            .trim()
+            .replace(' ', "+")
+            .replace('-', "+")
+            .replace('_', "/");
         match t.len() % 4 {
             2 => t.push_str("=="),
             3 => t.push('='),

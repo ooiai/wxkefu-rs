@@ -1,3 +1,4 @@
+use axum::extract::OriginalUri;
 use axum::{
     Router,
     body::Bytes,
@@ -6,10 +7,23 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use dotenvy::dotenv;
 use serde::Deserialize;
 use std::{env, net::SocketAddr, sync::Arc};
 use wxkefu_rs::callback;
+
+fn verify_encoding_aes_key(key: &str) -> bool {
+    // WeChat Kf requires a 43-character Base64 (no padding) string that decodes to 32 bytes after appending '='.
+    if key.trim().len() != 43 {
+        return false;
+    }
+    let with_pad = format!("{key}=");
+    match BASE64.decode(with_pad.as_bytes()) {
+        Ok(bytes) => bytes.len() == 32,
+        Err(_) => false,
+    }
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -48,15 +62,24 @@ async fn main() -> anyhow::Result<()> {
     let _ = dotenv();
 
     let token = env::var("WXKF_TOKEN")
-        .expect("Please set WXKF_TOKEN to the callback token you configured in Kf admin.");
+        .expect("Please set WXKF_TOKEN to the callback token you configured in Kf admin.")
+        .trim()
+        .to_string();
     let encoding_aes_key = env::var("WXKF_ENCODING_AES_KEY").expect(
         "Please set WXKF_ENCODING_AES_KEY to the 43-char EncodingAESKey from Kf admin (Developer Config).",
-    );
+    ).trim().to_string();
+    // Validate EncodingAESKey format early to surface misconfiguration quickly.
+    if !verify_encoding_aes_key(&encoding_aes_key) {
+        eprintln!(
+            "Warning: WXKF_ENCODING_AES_KEY appears invalid (must be 43 chars and decode to 32 bytes). The server will continue, but decryption will likely fail."
+        );
+    }
     // Optional; if provided, will be checked against the decrypted tail.
     // For WeCom/Kf this is commonly the corpid (ww...).
     let expected_receiver_id = env::var("WXKF_RECEIVER_ID")
         .ok()
-        .or_else(|| env::var("WXKF_CORP_ID").ok());
+        .or_else(|| env::var("WXKF_CORP_ID").ok())
+        .map(|s| s.trim().to_string());
 
     let port: u16 = env::var("PORT")
         .ok()
@@ -87,7 +110,10 @@ async fn main() -> anyhow::Result<()> {
 async fn callback_get(
     State(state): State<Arc<AppState>>,
     Query(q): Query<CallbackQuery>,
+    original_uri: OriginalUri,
 ) -> impl IntoResponse {
+    // Log the raw request URI (includes original path and query) to diagnose signature issues.
+    eprintln!("raw request uri: {:?}", original_uri);
     let ts = match &q.timestamp {
         Some(s) => s.as_str(),
         None => return (StatusCode::BAD_REQUEST, "missing timestamp").into_response(),
@@ -107,6 +133,24 @@ async fn callback_get(
             echo.as_str()
         };
         eprintln!("echo info: len={}, tail='{}'", elen, etail);
+        // Additional signature diagnostics to help identify mismatches.
+        let echo_norm = echo.replace(' ', "+");
+        let calc_sorted = callback::sha1_signature(&[&state.token, ts, nonce, &echo_norm]);
+        let calc_concat = callback::sha1_signature_concat(&[&state.token, ts, nonce, &echo_norm]);
+        let ntail = if echo_norm.len() >= 4 {
+            &echo_norm[echo_norm.len() - 4..]
+        } else {
+            echo_norm.as_str()
+        };
+        eprintln!(
+            "sig dbg: provided={}, sorted={}, concat={}, ts={}, nonce_len={}, echo_norm_tail='{}'",
+            sig,
+            calc_sorted,
+            calc_concat,
+            ts,
+            nonce.len(),
+            ntail
+        );
         // Use shared helper which verifies signature and decrypts (handles URL-safe base64 and padding).
         match callback::verify_and_decrypt_echostr(
             &state.token,
@@ -149,8 +193,11 @@ async fn callback_get(
 async fn callback_post(
     State(state): State<Arc<AppState>>,
     Query(q): Query<CallbackQuery>,
+    original_uri: OriginalUri,
     body: Bytes,
 ) -> impl IntoResponse {
+    // Log the raw request URI (includes original path and query) to diagnose signature issues.
+    eprintln!("raw request uri: {:?}", original_uri);
     let body_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid utf-8 body").into_response(),
