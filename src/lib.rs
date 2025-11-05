@@ -136,6 +136,7 @@ pub use token::{AccessToken, Auth, Error, KfClient, Result};
 pub mod account;
 pub mod callback;
 pub mod customer;
+pub mod errors;
 pub mod keygen;
 pub mod media;
 pub mod recall_msg;
