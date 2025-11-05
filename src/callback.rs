@@ -368,6 +368,31 @@ pub fn verify_and_decrypt_echostr(
     decrypt_b64_message(encoding_aes_key, echostr, expected_receiver_id)
 }
 
+/// Verify and decrypt echostr by trying multiple signature candidates for `echostr`.
+/// - First try `echostr_decoded` (already percent-decoded by framework).
+/// - Then, if provided, try `echostr_raw_percent_encoded` (the raw string as seen in the original URI).
+/// If signature matches using the raw-encoded string, decryption still uses the decoded string.
+pub fn verify_and_decrypt_echostr_candidates(
+    token: &str,
+    encoding_aes_key: &str,
+    timestamp: &str,
+    nonce: &str,
+    msg_signature: &str,
+    echostr_decoded: &str,
+    echostr_raw_percent_encoded: Option<&str>,
+    expected_receiver_id: Option<&str>,
+) -> Result<String, CallbackError> {
+    if verify_msg_signature(token, timestamp, nonce, echostr_decoded, msg_signature) {
+        return decrypt_b64_message(encoding_aes_key, echostr_decoded, expected_receiver_id);
+    }
+    if let Some(raw) = echostr_raw_percent_encoded {
+        if verify_msg_signature(token, timestamp, nonce, raw, msg_signature) {
+            return decrypt_b64_message(encoding_aes_key, echostr_decoded, expected_receiver_id);
+        }
+    }
+    Err(CallbackError::SignatureMismatch)
+}
+
 /// Convenience: verify-and-decrypt a POST callback body (XML/JSON wrapper).
 /// This is a thin wrapper around `handle_callback_raw`.
 pub fn verify_and_decrypt_post_body(

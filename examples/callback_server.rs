@@ -136,16 +136,15 @@ async fn callback_get(
             .nth(1)
             .and_then(|q| q.split('&').find(|kv| kv.starts_with("echostr=")))
             .map(|kv| kv["echostr=".len()..].to_string());
-        if let Some(raw_echostr) = raw_echostr_opt {
+        if let Some(raw_echostr) = raw_echostr_opt.as_deref() {
             let raw_tail = if raw_echostr.len() >= 4 {
                 &raw_echostr[raw_echostr.len() - 4..]
             } else {
-                raw_echostr.as_str()
+                raw_echostr
             };
-            let calc_sorted_raw =
-                callback::sha1_signature(&[&state.token, ts, nonce, &raw_echostr]);
+            let calc_sorted_raw = callback::sha1_signature(&[&state.token, ts, nonce, raw_echostr]);
             let calc_concat_raw =
-                callback::sha1_signature_concat(&[&state.token, ts, nonce, &raw_echostr]);
+                callback::sha1_signature_concat(&[&state.token, ts, nonce, raw_echostr]);
             eprintln!(
                 "sig dbg (raw echostr): sorted_raw={}, concat_raw={}, raw_tail='{}'",
                 calc_sorted_raw, calc_concat_raw, raw_tail
@@ -170,13 +169,14 @@ async fn callback_get(
             ntail
         );
         // Use shared helper which verifies signature and decrypts (handles URL-safe base64 and padding).
-        match callback::verify_and_decrypt_echostr(
+        match callback::verify_and_decrypt_echostr_candidates(
             &state.token,
             &state.encoding_aes_key,
             ts,
             nonce,
             sig,
             echo,
+            raw_echostr_opt.as_deref(),
             state.expected_receiver_id.as_deref(),
         ) {
             Ok(plain_echo) => {
@@ -185,6 +185,24 @@ async fn callback_get(
             }
             Err(e) => {
                 eprintln!("echo decrypt error: {e}");
+                // Fallback: verify signature against raw percent-encoded echostr,
+                // then decrypt using the decoded echostr from the parsed query.
+                if let Some(raw_echostr) = raw_echostr_opt.as_deref() {
+                    if callback::verify_msg_signature(&state.token, ts, nonce, raw_echostr, sig) {
+                        match callback::decrypt_b64_message(
+                            &state.encoding_aes_key,
+                            echo,
+                            state.expected_receiver_id.as_deref(),
+                        ) {
+                            Ok(plain_echo) => {
+                                return plain_echo.into_response();
+                            }
+                            Err(e2) => {
+                                eprintln!("echo decrypt error (fallback verified): {e2}");
+                            }
+                        }
+                    }
+                }
                 (StatusCode::BAD_REQUEST, "decrypt error").into_response()
             }
         }
