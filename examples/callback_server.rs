@@ -103,11 +103,19 @@ async fn callback_get(
     eprintln!("raw request uri: {:?}", original_uri);
     let ts = match &q.timestamp {
         Some(s) => s.as_str(),
-        None => return (StatusCode::BAD_REQUEST, "missing timestamp").into_response(),
+        None => {
+            let resp_body = "missing timestamp";
+            eprintln!("GET /callback response: {}", resp_body);
+            return (StatusCode::BAD_REQUEST, resp_body).into_response();
+        }
     };
     let nonce = match &q.nonce {
         Some(s) => s.as_str(),
-        None => return (StatusCode::BAD_REQUEST, "missing nonce").into_response(),
+        None => {
+            let resp_body = "missing nonce";
+            eprintln!("GET /callback response: {}", resp_body);
+            return (StatusCode::BAD_REQUEST, resp_body).into_response();
+        }
     };
 
     if let (Some(sig), Some(echo)) = (&q.msg_signature, &q.echostr) {
@@ -181,6 +189,7 @@ async fn callback_get(
         ) {
             Ok(plain_echo) => {
                 // Must return the plaintext echo for verification to succeed.
+                println!("GET /callback response: {}", plain_echo);
                 plain_echo.into_response()
             }
             Err(e) => {
@@ -195,6 +204,7 @@ async fn callback_get(
                             state.expected_receiver_id.as_deref(),
                         ) {
                             Ok(plain_echo) => {
+                                println!("GET /callback response: {}", plain_echo);
                                 return plain_echo.into_response();
                             }
                             Err(e2) => {
@@ -203,17 +213,32 @@ async fn callback_get(
                         }
                     }
                 }
-                (StatusCode::BAD_REQUEST, "decrypt error").into_response()
+                {
+                    let resp_body = "decrypt error";
+                    eprintln!("GET /callback response: {}", resp_body);
+                    (StatusCode::BAD_REQUEST, resp_body).into_response()
+                }
             }
         }
     } else if let (Some(sig), Some(echo)) = (&q.signature, &q.echostr) {
         // Unencrypted URL verification (OA style)
         if !callback::verify_url_signature(&state.token, ts, nonce, sig) {
-            return (StatusCode::FORBIDDEN, "signature mismatch").into_response();
+            {
+                let resp_body = "signature mismatch";
+                eprintln!("GET /callback response: {}", resp_body);
+                return (StatusCode::FORBIDDEN, resp_body).into_response();
+            }
         }
-        echo.clone().into_response()
+        {
+            println!("GET /callback response: {}", echo);
+            echo.clone().into_response()
+        }
     } else {
-        (StatusCode::BAD_REQUEST, "missing signature/echostr").into_response()
+        {
+            let resp_body = "missing signature/echostr";
+            eprintln!("GET /callback response: {}", resp_body);
+            (StatusCode::BAD_REQUEST, resp_body).into_response()
+        }
     }
 }
 
@@ -236,20 +261,36 @@ async fn callback_post(
     eprintln!("raw request uri: {:?}", original_uri);
     let body_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
-        Err(_) => return (StatusCode::BAD_REQUEST, "invalid utf-8 body").into_response(),
+        Err(_) => {
+            let resp_body = "invalid utf-8 body";
+            eprintln!("POST /callback response: {}", resp_body);
+            return (StatusCode::BAD_REQUEST, resp_body).into_response();
+        }
     };
 
     let ts = match &q.timestamp {
         Some(s) => s.as_str(),
-        None => return (StatusCode::BAD_REQUEST, "missing timestamp").into_response(),
+        None => {
+            let resp_body = "missing timestamp";
+            eprintln!("POST /callback response: {}", resp_body);
+            return (StatusCode::BAD_REQUEST, resp_body).into_response();
+        }
     };
     let nonce = match &q.nonce {
         Some(s) => s.as_str(),
-        None => return (StatusCode::BAD_REQUEST, "missing nonce").into_response(),
+        None => {
+            let resp_body = "missing nonce";
+            eprintln!("POST /callback response: {}", resp_body);
+            return (StatusCode::BAD_REQUEST, resp_body).into_response();
+        }
     };
     let sig = match &q.msg_signature {
         Some(s) => s.as_str(),
-        None => return (StatusCode::BAD_REQUEST, "missing msg_signature").into_response(),
+        None => {
+            let resp_body = "missing msg_signature";
+            eprintln!("POST /callback response: {}", resp_body);
+            return (StatusCode::BAD_REQUEST, resp_body).into_response();
+        }
     };
 
     match callback::handle_callback_raw(
@@ -273,11 +314,19 @@ async fn callback_post(
             }
 
             // Per WeChat convention, responding with "success" acknowledges receipt.
-            "success".into_response()
+            {
+                let resp_body = "success";
+                println!("POST /callback response: {}", resp_body);
+                resp_body.into_response()
+            }
         }
         Err(e) => {
             eprintln!("callback decrypt/verify error: {e}");
-            (StatusCode::BAD_REQUEST, "decrypt/verify error").into_response()
+            {
+                let resp_body = "decrypt/verify error";
+                eprintln!("POST /callback response: {}", resp_body);
+                (StatusCode::BAD_REQUEST, resp_body).into_response()
+            }
         }
     }
 }
