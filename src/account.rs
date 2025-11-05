@@ -62,6 +62,73 @@ pub struct AccountDelResponse {
     pub errmsg: String,
 }
 
+/// Request for kf/account/update
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountUpdateRequest {
+    /// Kf account ID to update (<=64 bytes)
+    pub open_kfid: String,
+    /// New display name (<=16 chars); omit to keep unchanged
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// New avatar temporary media_id (<=128 bytes); omit to keep unchanged
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_id: Option<String>,
+}
+
+/// Response for kf/account/update
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccountUpdateResponse {
+    pub errcode: i32,
+    pub errmsg: String,
+}
+
+/// Request for kf/account/list
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountListRequest {
+    /// Pagination offset, defaults to 0 if None
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u32>,
+    /// Page size 1..=100, defaults to 100 if None
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// Response for kf/account/list
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccountListResponse {
+    pub errcode: i32,
+    pub errmsg: String,
+    #[serde(default)]
+    pub account_list: Vec<AccountListItem>,
+}
+
+/// Account item in list
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccountListItem {
+    pub open_kfid: String,
+    pub name: String,
+    pub avatar: String,
+}
+
+/// Request for kf/add_contact_way
+#[derive(Debug, Clone, Serialize)]
+pub struct AddContactWayRequest {
+    /// Kf account ID
+    pub open_kfid: String,
+    /// Optional scene value (<=32 bytes, [0-9a-zA-Z_-]*). If provided, you can append scene_param when using the link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scene: Option<String>,
+}
+
+/// Response for kf/add_contact_way
+#[derive(Debug, Clone, Deserialize)]
+pub struct AddContactWayResponse {
+    pub errcode: i32,
+    pub errmsg: String,
+    /// The generated Kf URL. You can embed it in H5 or generate a QR from it.
+    pub url: String,
+}
+
 impl KfClient {
     /// Call kf/account/add to create a new customer service account.
     ///
@@ -81,7 +148,6 @@ impl KfClient {
         }
         debug!(%url, "account_add request");
 
-        // Short-lived HTTP client for this call
         let http = reqwest::Client::builder()
             .gzip(true)
             .build()
@@ -131,7 +197,6 @@ impl KfClient {
         }
         debug!(%url, "account_del request");
 
-        // Short-lived HTTP client for this call
         let http = reqwest::Client::builder()
             .gzip(true)
             .build()
@@ -142,6 +207,153 @@ impl KfClient {
         let bytes = resp.bytes().await.map_err(Error::from)?;
 
         match serde_json::from_slice::<AccountDelResponse>(&bytes) {
+            Ok(ok) => {
+                if ok.errcode == 0 {
+                    Ok(ok)
+                } else {
+                    Err(Error::Wx {
+                        code: ok.errcode as i64,
+                        message: ok.errmsg,
+                    })
+                }
+            }
+            Err(de_err) => {
+                let body = String::from_utf8_lossy(&bytes).to_string();
+                Err(Error::UnexpectedTokenResponse {
+                    status: status.as_u16(),
+                    error: de_err.to_string(),
+                    body,
+                })
+            }
+        }
+    }
+
+    /// Call kf/account/update to modify an existing customer service account (name and/or avatar).
+    ///
+    /// - access_token: WeCom (Kf) access_token
+    /// - req: request body with open_kfid and optional name/media_id
+    #[instrument(level = "debug", skip(self, req))]
+    pub async fn account_update(
+        &self,
+        access_token: &str,
+        req: &AccountUpdateRequest,
+    ) -> Result<AccountUpdateResponse> {
+        let mut url = Url::parse("https://qyapi.weixin.qq.com/cgi-bin/kf/account/update")
+            .map_err(|e| Error::InvalidUrl(e.to_string()))?;
+        {
+            let mut qp = url.query_pairs_mut();
+            qp.append_pair("access_token", access_token);
+        }
+        debug!(%url, "account_update request");
+
+        let http = reqwest::Client::builder()
+            .gzip(true)
+            .build()
+            .map_err(|e| Error::Http(e.into()))?;
+
+        let resp = http.post(url).json(req).send().await.map_err(Error::from)?;
+        let status = resp.status();
+        let bytes = resp.bytes().await.map_err(Error::from)?;
+
+        match serde_json::from_slice::<AccountUpdateResponse>(&bytes) {
+            Ok(ok) => {
+                if ok.errcode == 0 {
+                    Ok(ok)
+                } else {
+                    Err(Error::Wx {
+                        code: ok.errcode as i64,
+                        message: ok.errmsg,
+                    })
+                }
+            }
+            Err(de_err) => {
+                let body = String::from_utf8_lossy(&bytes).to_string();
+                Err(Error::UnexpectedTokenResponse {
+                    status: status.as_u16(),
+                    error: de_err.to_string(),
+                    body,
+                })
+            }
+        }
+    }
+
+    /// Call kf/account/list to fetch Kf account list (supports pagination with offset/limit).
+    ///
+    /// - access_token: WeCom (Kf) access_token
+    /// - req: optional pagination settings
+    #[instrument(level = "debug", skip(self, req))]
+    pub async fn account_list(
+        &self,
+        access_token: &str,
+        req: &AccountListRequest,
+    ) -> Result<AccountListResponse> {
+        let mut url = Url::parse("https://qyapi.weixin.qq.com/cgi-bin/kf/account/list")
+            .map_err(|e| Error::InvalidUrl(e.to_string()))?;
+        {
+            let mut qp = url.query_pairs_mut();
+            qp.append_pair("access_token", access_token);
+        }
+        debug!(%url, "account_list request");
+
+        let http = reqwest::Client::builder()
+            .gzip(true)
+            .build()
+            .map_err(|e| Error::Http(e.into()))?;
+
+        let resp = http.post(url).json(req).send().await.map_err(Error::from)?;
+        let status = resp.status();
+        let bytes = resp.bytes().await.map_err(Error::from)?;
+
+        match serde_json::from_slice::<AccountListResponse>(&bytes) {
+            Ok(ok) => {
+                if ok.errcode == 0 {
+                    Ok(ok)
+                } else {
+                    Err(Error::Wx {
+                        code: ok.errcode as i64,
+                        message: ok.errmsg,
+                    })
+                }
+            }
+            Err(de_err) => {
+                let body = String::from_utf8_lossy(&bytes).to_string();
+                Err(Error::UnexpectedTokenResponse {
+                    status: status.as_u16(),
+                    error: de_err.to_string(),
+                    body,
+                })
+            }
+        }
+    }
+
+    /// Call kf/add_contact_way to generate a Kf contact URL (H5 link).
+    ///
+    /// - access_token: WeCom (Kf) access_token
+    /// - req: open_kfid and optional scene
+    #[instrument(level = "debug", skip(self, req))]
+    pub async fn add_contact_way(
+        &self,
+        access_token: &str,
+        req: &AddContactWayRequest,
+    ) -> Result<AddContactWayResponse> {
+        let mut url = Url::parse("https://qyapi.weixin.qq.com/cgi-bin/kf/add_contact_way")
+            .map_err(|e| Error::InvalidUrl(e.to_string()))?;
+        {
+            let mut qp = url.query_pairs_mut();
+            qp.append_pair("access_token", access_token);
+        }
+        debug!(%url, "add_contact_way request");
+
+        let http = reqwest::Client::builder()
+            .gzip(true)
+            .build()
+            .map_err(|e| Error::Http(e.into()))?;
+
+        let resp = http.post(url).json(req).send().await.map_err(Error::from)?;
+        let status = resp.status();
+        let bytes = resp.bytes().await.map_err(Error::from)?;
+
+        match serde_json::from_slice::<AddContactWayResponse>(&bytes) {
             Ok(ok) => {
                 if ok.errcode == 0 {
                     Ok(ok)
