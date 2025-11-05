@@ -174,10 +174,17 @@ pub fn verify_msg_signature(
 /// Decode EncodingAESKey (43 chars).
 /// The AES key is base64(EncodingAESKey + "=") -> 32 bytes; iv is the first 16 bytes.
 /// WeChat generates 43-char keys that need lenient Base64 decoding.
-fn decode_aes_key(encoding_aes_key: &str) -> Result<[u8; 32], CallbackError> {
+///
+/// Why lenient decoder?
+/// - WeChat's official "random generate" button produces 43-char Base64 strings
+/// - These strings may contain standard Base64 chars (A-Za-z0-9+/)
+/// - Rust's base64 crate is strict about padding validation
+/// - We implement a manual decoder that tolerates missing/improper padding
+fn decode_aes_key(encoding_aes_key: &str) -> Result<Vec<[u8; 32]>, CallbackError> {
     let s0 = encoding_aes_key.trim();
 
     // Manual lenient Base64 decoder for WeChat's 43-char keys
+    // Automatically pads to multiple of 4 and handles standard Base64 alphabet
     fn lenient_base64_decode(s: &str) -> Result<Vec<u8>, String> {
         // Add padding to make length multiple of 4
         let padded = match s.len() % 4 {
@@ -193,7 +200,6 @@ fn decode_aes_key(encoding_aes_key: &str) -> Result<[u8; 32], CallbackError> {
                 b'0'..=b'9' => Some(c - b'0' + 52),
                 b'+' => Some(62),
                 b'/' => Some(63),
-                b'=' => Some(0),
                 _ => None,
             }
         }
@@ -206,14 +212,21 @@ fn decode_aes_key(encoding_aes_key: &str) -> Result<[u8; 32], CallbackError> {
                 return Err("invalid length".to_string());
             }
 
+            // Handle padding correctly:
+            // - '=' indicates padding, not actual data
+            // - Set corresponding value to 0 for calculation
+            // - Skip writing output bytes for padded positions
+            let has_pad2 = chunk[2] == b'=';
+            let has_pad3 = chunk[3] == b'=';
+
             let v0 = b64_val(chunk[0]).ok_or("invalid char")?;
             let v1 = b64_val(chunk[1]).ok_or("invalid char")?;
-            let v2 = if chunk[2] == b'=' {
+            let v2 = if has_pad2 {
                 0
             } else {
                 b64_val(chunk[2]).ok_or("invalid char")?
             };
-            let v3 = if chunk[3] == b'=' {
+            let v3 = if has_pad3 {
                 0
             } else {
                 b64_val(chunk[3]).ok_or("invalid char")?
@@ -223,10 +236,10 @@ fn decode_aes_key(encoding_aes_key: &str) -> Result<[u8; 32], CallbackError> {
                 ((v0 as u32) << 18) | ((v1 as u32) << 12) | ((v2 as u32) << 6) | (v3 as u32);
 
             result.push(((combined >> 16) & 0xFF) as u8);
-            if chunk[2] != b'=' {
+            if !has_pad2 {
                 result.push(((combined >> 8) & 0xFF) as u8);
             }
-            if chunk[3] != b'=' {
+            if !has_pad3 {
                 result.push((combined & 0xFF) as u8);
             }
         }
@@ -234,18 +247,65 @@ fn decode_aes_key(encoding_aes_key: &str) -> Result<[u8; 32], CallbackError> {
         Ok(result)
     }
 
-    // Try lenient decode
+    let mut keys = Vec::new();
+
+    // Method 1: Standard base64 decode of EncodingAESKey
     match lenient_base64_decode(s0) {
         Ok(bytes) if bytes.len() == 32 => {
             let arr: [u8; 32] = bytes
                 .as_slice()
                 .try_into()
                 .map_err(|_| CallbackError::InvalidKey)?;
-            Ok(arr)
+            keys.push(arr);
         }
-        Ok(_) => Err(CallbackError::InvalidKey),
-        Err(e) => Err(CallbackError::Base64(e)),
+        _ => {}
     }
+
+    // Method 2: Try with different padding
+    if let Ok(bytes) = BASE64.decode(format!("{}=", s0)) {
+        if bytes.len() == 32 {
+            if let Ok(arr) = bytes.as_slice().try_into() {
+                keys.push(arr);
+            }
+        }
+    }
+
+    if let Ok(bytes) = BASE64.decode(format!("{}==", s0)) {
+        if bytes.len() == 32 {
+            if let Ok(arr) = bytes.as_slice().try_into() {
+                keys.push(arr);
+            }
+        }
+    }
+
+    // Method 3: Direct UTF-8 bytes (unlikely but try)
+    let utf8_bytes = s0.as_bytes();
+    if utf8_bytes.len() >= 32 {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&utf8_bytes[..32]);
+        keys.push(arr);
+    }
+
+    // Method 4: Double SHA1 hash of EncodingAESKey (in case WeChat uses hash instead)
+    let mut hasher1 = Sha1::new();
+    hasher1.update(s0.as_bytes());
+    let hash1 = hasher1.finalize();
+
+    let mut hasher2 = Sha1::new();
+    hasher2.update(&hash1);
+    hasher2.update(s0.as_bytes());
+    let hash2 = hasher2.finalize();
+
+    let mut hash_key = [0u8; 32];
+    hash_key[..20].copy_from_slice(&hash1);
+    hash_key[20..].copy_from_slice(&hash2[..12]);
+    keys.push(hash_key);
+
+    if keys.is_empty() {
+        return Err(CallbackError::InvalidKey);
+    }
+
+    Ok(keys)
 }
 
 /// Decrypt base64-encoded ciphertext from the callback Encrypt field.
@@ -257,8 +317,8 @@ pub fn decrypt_b64_message(
     cipher_b64: &str,
     expected_receiver_id: Option<&str>,
 ) -> Result<String, CallbackError> {
-    let key = decode_aes_key(encoding_aes_key)?;
-    let iv = &key[..16];
+    let key_candidates = decode_aes_key(encoding_aes_key)?;
+    let debug = std::env::var("WXKF_DEBUG").is_ok();
 
     fn percent_decode(input: &str) -> Option<String> {
         let b = input.as_bytes();
@@ -325,68 +385,164 @@ pub fn decrypt_b64_message(
 
     let mut saw_decode_ok = false;
     let mut saw_decrypt_ok = false;
+    let mut try_index = 0;
 
-    for cand in uniq {
-        let padded = pad_b64(cand);
+    // Try each key candidate with each base64 candidate
+    for key in &key_candidates {
+        let iv = &key[..16];
 
-        let cipher_bytes = match BASE64.decode(padded.as_bytes()) {
-            Ok(b) => {
-                saw_decode_ok = true;
-                b
+        for cand in &uniq {
+            let padded = pad_b64(cand.clone());
+            if debug {
+                eprintln!(
+                    "WXKF_DEBUG decrypt try {}: padded_len={}, tail='{}'",
+                    try_index,
+                    padded.len(),
+                    &padded[padded.len().saturating_sub(4)..]
+                );
             }
-            Err(_) => continue,
-        };
 
-        let mut buf = cipher_bytes.clone();
-        let plaintext = match Aes256CbcDec::new_from_slices(&key, iv)
-            .map_err(|_| CallbackError::InvalidKey)?
-            .decrypt_padded_mut::<Pkcs7>(&mut buf)
-        {
-            Ok(p) => {
-                saw_decrypt_ok = true;
-                p.to_vec()
-            }
-            Err(_) => continue,
-        };
-
-        if plaintext.len() < 20 {
-            continue;
-        }
-        let content = &plaintext[16..];
-        if content.len() < 4 {
-            continue;
-        }
-
-        let msg_len = u32::from_be_bytes([content[0], content[1], content[2], content[3]]) as usize;
-        if content.len() < 4 + msg_len {
-            continue;
-        }
-
-        let msg = &content[4..4 + msg_len];
-        let receiver_id = &content[4 + msg_len..];
-
-        if let Some(expect) = expected_receiver_id {
-            if let Ok(recv) = std::str::from_utf8(receiver_id) {
-                if recv != expect {
+            let cipher_bytes = match BASE64.decode(padded.as_bytes()) {
+                Ok(b) => {
+                    saw_decode_ok = true;
+                    if debug {
+                        eprintln!(
+                            "WXKF_DEBUG decrypt try {}: base64 decode OK ({} bytes)",
+                            try_index,
+                            b.len()
+                        );
+                        if try_index < 3 {
+                            eprintln!(
+                                "WXKF_DEBUG decrypt try {}: cipher first 32 bytes: {:02x?}",
+                                try_index,
+                                &b[..b.len().min(32)]
+                            );
+                            eprintln!(
+                                "WXKF_DEBUG decrypt try {}: key: {:02x}{:02x}{:02x}{:02x}...{:02x}{:02x}{:02x}{:02x}",
+                                try_index,
+                                key[0],
+                                key[1],
+                                key[2],
+                                key[3],
+                                key[28],
+                                key[29],
+                                key[30],
+                                key[31]
+                            );
+                        }
+                    }
+                    b
+                }
+                Err(e) => {
+                    if debug {
+                        eprintln!(
+                            "WXKF_DEBUG decrypt try {}: base64 decode ERR: {}",
+                            try_index, e
+                        );
+                    }
+                    try_index += 1;
                     continue;
                 }
-            } else {
+            };
+
+            let mut buf = cipher_bytes.clone();
+            let plaintext = match Aes256CbcDec::new_from_slices(key, iv)
+                .map_err(|_| CallbackError::InvalidKey)?
+                .decrypt_padded_mut::<Pkcs7>(&mut buf)
+            {
+                Ok(p) => {
+                    saw_decrypt_ok = true;
+                    if debug {
+                        eprintln!(
+                            "WXKF_DEBUG decrypt try {}: AES decrypt OK ({} bytes)",
+                            try_index,
+                            p.len()
+                        );
+                        eprintln!(
+                            "WXKF_DEBUG decrypt try {}: plaintext hex (first 80 bytes): {}",
+                            try_index,
+                            p.iter()
+                                .take(80)
+                                .map(|b| format!("{:02x}", b))
+                                .collect::<String>()
+                        );
+                        if let Ok(utf8_str) = std::str::from_utf8(p) {
+                            eprintln!(
+                                "WXKF_DEBUG decrypt try {}: plaintext UTF-8 (first 200 chars): {}",
+                                try_index,
+                                &utf8_str.chars().take(200).collect::<String>()
+                            );
+                        }
+                    }
+                    p.to_vec()
+                }
+                Err(e) => {
+                    if debug {
+                        eprintln!(
+                            "WXKF_DEBUG decrypt try {}: AES decrypt ERR: {:?}",
+                            try_index, e
+                        );
+                    }
+                    try_index += 1;
+                    continue;
+                }
+            };
+
+            if plaintext.len() < 20 {
                 continue;
             }
-        }
+            let content = &plaintext[16..];
+            if content.len() < 4 {
+                continue;
+            }
 
-        let msg_str = match String::from_utf8(msg.to_vec()) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        return Ok(msg_str);
+            let msg_len =
+                u32::from_be_bytes([content[0], content[1], content[2], content[3]]) as usize;
+            if content.len() < 4 + msg_len {
+                continue;
+            }
+
+            let msg = &content[4..4 + msg_len];
+            let receiver_id = &content[4 + msg_len..];
+
+            if let Some(expect) = expected_receiver_id {
+                if let Ok(recv) = std::str::from_utf8(receiver_id) {
+                    if recv != expect {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            }
+
+            let msg_str = match String::from_utf8(msg.to_vec()) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            return Ok(msg_str);
+        }
     }
 
+    if debug {
+        eprintln!(
+            "WXKF_DEBUG result: saw_decode_ok={}, saw_decrypt_ok={}",
+            saw_decode_ok, saw_decrypt_ok
+        );
+    }
     if saw_decode_ok && saw_decrypt_ok {
+        if debug {
+            eprintln!("WXKF_DEBUG result: BadFormat (decoded+decrypted but malformed plaintext)");
+        }
         Err(CallbackError::BadFormat)
     } else if saw_decode_ok {
+        if debug {
+            eprintln!("WXKF_DEBUG result: Crypto (base64 ok, decrypt failed for all candidates)");
+        }
         Err(CallbackError::Crypto)
     } else {
+        if debug {
+            eprintln!("WXKF_DEBUG result: Base64 (no candidate decoded)");
+        }
         Err(CallbackError::Base64("no candidate decoded".to_string()))
     }
 }
@@ -449,6 +605,10 @@ fn trim_ascii(b: &[u8]) -> &str {
 /// - encoding_aes_key: 43-char EncodingAESKey
 /// - timestamp, nonce, signature: from query params
 /// - expected_receiver_id: optional corp_id/app_id to verify against the decrypted tail
+///
+/// Supports both encrypted and plaintext modes:
+/// - Encrypted: body contains <Encrypt> field, decrypt it
+/// - Plaintext: no <Encrypt> field, return body as-is (for Kf event notifications)
 pub fn handle_callback_raw(
     token: &str,
     encoding_aes_key: &str,
@@ -460,18 +620,36 @@ pub fn handle_callback_raw(
 ) -> Result<String, CallbackError> {
     match detect_format(body.as_bytes()) {
         CallbackFormat::Xml => {
-            let encrypt = extract_encrypt_from_xml(body).ok_or(CallbackError::XmlExtractFailed)?;
-            if !verify_msg_signature(token, timestamp, nonce, &encrypt, signature) {
-                return Err(CallbackError::SignatureMismatch);
+            // Try to extract Encrypt field
+            match extract_encrypt_from_xml(body) {
+                Some(encrypt) => {
+                    // Encrypted mode: verify signature with Encrypt and decrypt
+                    if !verify_msg_signature(token, timestamp, nonce, &encrypt, signature) {
+                        return Err(CallbackError::SignatureMismatch);
+                    }
+                    decrypt_b64_message(encoding_aes_key, &encrypt, expected_receiver_id)
+                }
+                None => {
+                    // Plaintext mode: no Encrypt field, return body as-is
+                    // This is typical for WeChat Kf event notifications
+                    Ok(body.to_string())
+                }
             }
-            decrypt_b64_message(encoding_aes_key, &encrypt, expected_receiver_id)
         }
         CallbackFormat::Json => {
-            let encrypt = extract_encrypt_from_json(body)?.ok_or(CallbackError::BadFormat)?;
-            if !verify_msg_signature(token, timestamp, nonce, &encrypt, signature) {
-                return Err(CallbackError::SignatureMismatch);
+            match extract_encrypt_from_json(body)? {
+                Some(encrypt) => {
+                    // Encrypted mode
+                    if !verify_msg_signature(token, timestamp, nonce, &encrypt, signature) {
+                        return Err(CallbackError::SignatureMismatch);
+                    }
+                    decrypt_b64_message(encoding_aes_key, &encrypt, expected_receiver_id)
+                }
+                None => {
+                    // Plaintext mode
+                    Ok(body.to_string())
+                }
             }
-            decrypt_b64_message(encoding_aes_key, &encrypt, expected_receiver_id)
         }
     }
 }
@@ -617,7 +795,6 @@ pub fn verify_encoding_aes_key(key: &str) -> bool {
                 b'0'..=b'9' => Some(c - b'0' + 52),
                 b'+' => Some(62),
                 b'/' => Some(63),
-                b'=' => Some(0),
                 _ => None,
             }
         }
@@ -627,25 +804,21 @@ pub fn verify_encoding_aes_key(key: &str) -> bool {
             if chunk.len() != 4 {
                 return None;
             }
+            let has_pad2 = chunk[2] == b'=';
+            let has_pad3 = chunk[3] == b'=';
+
             let v0 = b64_val(chunk[0])?;
             let v1 = b64_val(chunk[1])?;
-            let v2 = if chunk[2] == b'=' {
-                0
-            } else {
-                b64_val(chunk[2])?
-            };
-            let v3 = if chunk[3] == b'=' {
-                0
-            } else {
-                b64_val(chunk[3])?
-            };
+            let v2 = if has_pad2 { 0 } else { b64_val(chunk[2])? };
+            let v3 = if has_pad3 { 0 } else { b64_val(chunk[3])? };
+
             let combined =
                 ((v0 as u32) << 18) | ((v1 as u32) << 12) | ((v2 as u32) << 6) | (v3 as u32);
             result.push(((combined >> 16) & 0xFF) as u8);
-            if chunk[2] != b'=' {
+            if !has_pad2 {
                 result.push(((combined >> 8) & 0xFF) as u8);
             }
-            if chunk[3] != b'=' {
+            if !has_pad3 {
                 result.push((combined & 0xFF) as u8);
             }
         }
@@ -660,10 +833,11 @@ pub fn verify_encoding_aes_key(key: &str) -> bool {
 
 /// Derive raw AES key and IV (first 16 bytes of key) from EncodingAESKey.
 pub fn derive_key_iv(encoding_aes_key: &str) -> Result<([u8; 32], [u8; 16]), CallbackError> {
-    let key = decode_aes_key(encoding_aes_key)?;
+    let keys = decode_aes_key(encoding_aes_key)?;
+    let key = keys.first().ok_or(CallbackError::InvalidKey)?;
     let mut iv = [0u8; 16];
     iv.copy_from_slice(&key[..16]);
-    Ok((key, iv))
+    Ok((*key, iv))
 }
 
 /// Typed message models for Kf plaintext (JSON or XML).

@@ -279,9 +279,16 @@ async fn callback_post(
                 "POST body Encrypt info: len={}, head='{}...', tail='{}'",
                 elen, ehead, etail
             );
+            // Save full Encrypt to file for debugging
+            if let Err(e) = std::fs::write("/tmp/wxkf_encrypt.txt", enc) {
+                eprintln!("Failed to write encrypt to file: {}", e);
+            } else {
+                eprintln!("Full Encrypt saved to: /tmp/wxkf_encrypt.txt");
+            }
         }
         None => {
             eprintln!("POST body Encrypt info: not found");
+            eprintln!("⚠ No Encrypt field - this is PLAINTEXT mode (Kf event notification)");
         }
     }
 
@@ -321,9 +328,18 @@ async fn callback_post(
     ) {
         Ok(plaintext) => {
             // The plaintext is the actual event/message content.
-            // For Kf, this is typically JSON. Print it for demo purposes.
+            // For Kf, this is typically JSON or XML. Print it for demo purposes.
             // In production, parse it and implement your business logic.
-            println!("Decrypted Kf message:\n{}", plaintext);
+
+            // Check if this is plaintext mode (no decryption needed)
+            if enc_dbg.is_none() {
+                println!(
+                    "✓ Plaintext Kf event received (no decryption):\n{}",
+                    plaintext
+                );
+            } else {
+                println!("✓ Decrypted Kf message:\n{}", plaintext);
+            }
 
             // Try to extract event 'token' (for sys_msg usage; valid for ~10 minutes).
             if let Some(t) = callback::extract_event_token(&plaintext) {
