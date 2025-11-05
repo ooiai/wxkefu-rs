@@ -44,9 +44,9 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // 2) Build initial sync request
-    let sync_token = env::var("WXKF_SYNC_TOKEN").ok();
-    let open_kfid = env::var("WXKF_OPEN_KFID").ok();
-    let cursor = env::var("WXKF_CURSOR").ok();
+    let sync_token = env::var("WXKF_SYNC_TOKEN").ok().filter(|s| !s.is_empty());
+    let open_kfid = env::var("WXKF_OPEN_KFID").ok().filter(|s| !s.is_empty());
+    let cursor = env::var("WXKF_CURSOR").ok().filter(|s| !s.is_empty());
     let limit = env::var("WXKF_LIMIT")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
@@ -60,6 +60,12 @@ async fn main() -> anyhow::Result<()> {
         eprintln!(
             "Hint: WXKF_SYNC_TOKEN is not set. The sync_msg API will have stricter rate limits."
         );
+    }
+    if open_kfid.is_none() {
+        eprintln!("Hint: WXKF_OPEN_KFID is not set. Pulling messages for all Kf accounts.");
+    }
+    if cursor.is_none() {
+        eprintln!("Hint: WXKF_CURSOR is not set. Starting from the latest position.");
     }
 
     let mut req = SyncMsgRequest {

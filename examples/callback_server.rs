@@ -79,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
         Query(q): Query<WxQuery>,
         body: String,
     ) -> axum::response::Response {
+        tracing::info!("Callback received query: {:?}", q);
         match state
             .crypto
             .verify_and_decrypt_xml(&q.msg_signature, &q.timestamp, &q.nonce, &body)
@@ -130,10 +131,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let app = Router::new()
+        .route("/callback", get(verify))
+        .route("/callback", post(callback))
         .route("/wx/kf/callback", get(verify))
         .route("/wx/kf/callback", post(callback))
         .with_state(state);
 
+    tracing::info!("Callback routes enabled at /callback and /wx/kf/callback");
     // Bind and serve
     let addr: SocketAddr = "0.0.0.0:3000".parse().unwrap();
     tracing::info!("WeChat Kf callback server listening on {}", addr);
