@@ -171,106 +171,80 @@ pub fn verify_msg_signature(
     false
 }
 
-/// Decode EncodingAESKey (tolerant).
-/// Tries multiple normalization strategies until a 32-byte key is obtained:
-/// - trim whitespace
-/// - try as-is, then append '=', '=='
-/// - map URL-safe base64 ('-'->'+', '_'->'/')
-/// - percent-decode variants
-/// Returns 32-byte key if any candidate decodes to 32 bytes; otherwise InvalidKey/Base64.
+/// Decode EncodingAESKey (43 chars).
+/// The AES key is base64(EncodingAESKey + "=") -> 32 bytes; iv is the first 16 bytes.
+/// WeChat generates 43-char keys that need lenient Base64 decoding.
 fn decode_aes_key(encoding_aes_key: &str) -> Result<[u8; 32], CallbackError> {
-    fn urlsafe_to_std(s: &str) -> String {
-        s.replace('-', "+").replace('_', "/")
-    }
-    fn percent_decode(input: &str) -> Option<String> {
-        let b = input.as_bytes();
-        let mut out = Vec::with_capacity(b.len());
-        let mut i = 0;
-        while i < b.len() {
-            if b[i] == b'%' && i + 2 < b.len() {
-                let h1 = b[i + 1] as char;
-                let h2 = b[i + 2] as char;
-                let v1 = h1.to_digit(16)?;
-                let v2 = h2.to_digit(16)?;
-                out.push((v1 * 16 + v2) as u8);
-                i += 3;
-            } else {
-                out.push(b[i]);
-                i += 1;
-            }
-        }
-        String::from_utf8(out).ok()
-    }
-    fn pad_variants(s: &str) -> [String; 3] {
-        [s.to_string(), format!("{s}="), format!("{s}==")]
-    }
-
     let s0 = encoding_aes_key.trim();
 
-    // Build base candidates
-    let mut bases: Vec<String> = Vec::new();
-    bases.push(s0.to_string());
-    bases.push(urlsafe_to_std(s0));
-    if let Some(dec) = percent_decode(s0) {
-        bases.push(dec.clone());
-        bases.push(urlsafe_to_std(&dec));
-    }
+    // Manual lenient Base64 decoder for WeChat's 43-char keys
+    fn lenient_base64_decode(s: &str) -> Result<Vec<u8>, String> {
+        // Add padding to make length multiple of 4
+        let padded = match s.len() % 4 {
+            0 => s.to_string(),
+            n => format!("{}{}", s, "=".repeat(4 - n)),
+        };
 
-    // Deduplicate bases
-    let mut uniq_bases: Vec<String> = Vec::new();
-    'outer: for b in bases {
-        for u in &uniq_bases {
-            if u == &b {
-                continue 'outer;
+        // Manual Base64 decode
+        fn b64_val(c: u8) -> Option<u8> {
+            match c {
+                b'A'..=b'Z' => Some(c - b'A'),
+                b'a'..=b'z' => Some(c - b'a' + 26),
+                b'0'..=b'9' => Some(c - b'0' + 52),
+                b'+' => Some(62),
+                b'/' => Some(63),
+                b'=' => Some(0),
+                _ => None,
             }
         }
-        uniq_bases.push(b);
-    }
 
-    // Try each base with padding variants
-    let mut saw_decode_err = None::<String>;
-    for b in uniq_bases {
-        for cand in &pad_variants(&b) {
-            match BASE64.decode(cand.as_bytes()) {
-                Ok(bytes) => {
-                    if bytes.len() == 32 {
-                        let arr: [u8; 32] = bytes
-                            .as_slice()
-                            .try_into()
-                            .map_err(|_| CallbackError::InvalidKey)?;
-                        return Ok(arr);
-                    } else {
-                        // Try to smart-pad if not multiple of 4 and not 32 bytes
-                        let mut t = cand.clone();
-                        match t.len() % 4 {
-                            2 => t.push_str("=="),
-                            3 => t.push('='),
-                            1 => t.push_str("==="),
-                            _ => {}
-                        }
-                        if let Ok(bytes2) = BASE64.decode(t.as_bytes()) {
-                            if bytes2.len() == 32 {
-                                let arr: [u8; 32] = bytes2
-                                    .as_slice()
-                                    .try_into()
-                                    .map_err(|_| CallbackError::InvalidKey)?;
-                                return Ok(arr);
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    saw_decode_err = Some(e.to_string());
-                    continue;
-                }
+        let bytes = padded.as_bytes();
+        let mut result = Vec::new();
+
+        for chunk in bytes.chunks(4) {
+            if chunk.len() != 4 {
+                return Err("invalid length".to_string());
+            }
+
+            let v0 = b64_val(chunk[0]).ok_or("invalid char")?;
+            let v1 = b64_val(chunk[1]).ok_or("invalid char")?;
+            let v2 = if chunk[2] == b'=' {
+                0
+            } else {
+                b64_val(chunk[2]).ok_or("invalid char")?
+            };
+            let v3 = if chunk[3] == b'=' {
+                0
+            } else {
+                b64_val(chunk[3]).ok_or("invalid char")?
+            };
+
+            let combined =
+                ((v0 as u32) << 18) | ((v1 as u32) << 12) | ((v2 as u32) << 6) | (v3 as u32);
+
+            result.push(((combined >> 16) & 0xFF) as u8);
+            if chunk[2] != b'=' {
+                result.push(((combined >> 8) & 0xFF) as u8);
+            }
+            if chunk[3] != b'=' {
+                result.push((combined & 0xFF) as u8);
             }
         }
+
+        Ok(result)
     }
 
-    if let Some(e) = saw_decode_err {
-        Err(CallbackError::Base64(e))
-    } else {
-        Err(CallbackError::InvalidKey)
+    // Try lenient decode
+    match lenient_base64_decode(s0) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let arr: [u8; 32] = bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| CallbackError::InvalidKey)?;
+            Ok(arr)
+        }
+        Ok(_) => Err(CallbackError::InvalidKey),
+        Err(e) => Err(CallbackError::Base64(e)),
     }
 }
 
@@ -308,14 +282,17 @@ pub fn decrypt_b64_message(
     fn urlsafe_to_std(s: &str) -> String {
         s.replace('-', "+").replace('_', "/")
     }
-    fn pad_b64(mut s: String) -> String {
-        match s.len() % 4 {
-            2 => s.push_str("=="),
-            3 => s.push('='),
-            1 => s.push_str("==="),
+    fn pad_b64(s: String) -> String {
+        // Strip all whitespace (newlines, tabs, spaces) that may be present in MIME-style Base64
+        let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+        let mut result = cleaned;
+        match result.len() % 4 {
+            2 => result.push_str("=="),
+            3 => result.push('='),
+            1 => result.push_str("==="),
             _ => {}
         }
-        s
+        result
     }
 
     // Build normalization candidates in a liberal order.
@@ -351,6 +328,7 @@ pub fn decrypt_b64_message(
 
     for cand in uniq {
         let padded = pad_b64(cand);
+
         let cipher_bytes = match BASE64.decode(padded.as_bytes()) {
             Ok(b) => {
                 saw_decode_ok = true;
@@ -622,14 +600,61 @@ pub fn extract_token_from_xml(xml: &str) -> Option<String> {
 
 /// Verify that the encoding AES key is valid.
 pub fn verify_encoding_aes_key(key: &str) -> bool {
-    // WeChat Kf requires a 43-character Base64 (no padding) string that decodes to 32 bytes after appending '='.
+    // WeChat Kf requires a 43-character string that decodes to 32 bytes
     if key.trim().len() != 43 {
         return false;
     }
-    let with_pad = format!("{key}=");
-    match BASE64.decode(with_pad.as_bytes()) {
-        Ok(bytes) => bytes.len() == 32,
-        Err(_) => false,
+    // Try lenient decode
+    fn lenient_base64_decode(s: &str) -> Option<Vec<u8>> {
+        let padded = match s.len() % 4 {
+            0 => s.to_string(),
+            n => format!("{}{}", s, "=".repeat(4 - n)),
+        };
+        fn b64_val(c: u8) -> Option<u8> {
+            match c {
+                b'A'..=b'Z' => Some(c - b'A'),
+                b'a'..=b'z' => Some(c - b'a' + 26),
+                b'0'..=b'9' => Some(c - b'0' + 52),
+                b'+' => Some(62),
+                b'/' => Some(63),
+                b'=' => Some(0),
+                _ => None,
+            }
+        }
+        let bytes = padded.as_bytes();
+        let mut result = Vec::new();
+        for chunk in bytes.chunks(4) {
+            if chunk.len() != 4 {
+                return None;
+            }
+            let v0 = b64_val(chunk[0])?;
+            let v1 = b64_val(chunk[1])?;
+            let v2 = if chunk[2] == b'=' {
+                0
+            } else {
+                b64_val(chunk[2])?
+            };
+            let v3 = if chunk[3] == b'=' {
+                0
+            } else {
+                b64_val(chunk[3])?
+            };
+            let combined =
+                ((v0 as u32) << 18) | ((v1 as u32) << 12) | ((v2 as u32) << 6) | (v3 as u32);
+            result.push(((combined >> 16) & 0xFF) as u8);
+            if chunk[2] != b'=' {
+                result.push(((combined >> 8) & 0xFF) as u8);
+            }
+            if chunk[3] != b'=' {
+                result.push((combined & 0xFF) as u8);
+            }
+        }
+        Some(result)
+    }
+
+    match lenient_base64_decode(key.trim()) {
+        Some(bytes) => bytes.len() == 32,
+        None => false,
     }
 }
 
