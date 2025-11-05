@@ -1,135 +1,226 @@
-Overview (English)
+# wxkefu-rs
 
-`wxkefu-rs` helps you integrate WeChat Customer Service (WeChat Kefu) to deliver a consistent consulting experience across WeChat internal and external entry points. It supports WeCom (Enterprise WeChat) QR code login and provides API-based messaging and agent management.
+WeChat Customer Service (WeCom Kf) client for Rust. This crate focuses on integrating WeChat Customer Service APIs: token acquisition (WeCom Kf), encrypted callback helpers, message pull and send, media upload/get, welcome message, recall, customer profiles, Kf account management, error helpers, and runnable examples.
 
-- Official site: https://kf.weixin.qq.com/
-- Developer docs: https://kf.weixin.qq.com/api/doc/path/93304
+Official product info and docs:
 
-WeChat Kefu can be embedded in multiple entry points such as Channels, Official Accounts, Mini Programs, WeChat Search, WeChat Pay receipts, as well as external apps and web pages.
+- Product: https://kf.weixin.qq.com/
+- API docs: https://kf.weixin.qq.com/api/doc/path/93304
 
-### Features
+Highlights
 
-- Rich entry points across WeChat and external surfaces
-- Consistent chat experience without requiring users to add contacts
-- API for sending/receiving messages and managing customer service accounts
-- WeCom QR login for enterprise-grade identity and access control
+- WeCom (Enterprise WeChat) Customer Service (Kf) API client in Rust
+- Encrypted callback utilities (signature verification + AES decryption)
+- Message sync (pull) and message sending (text, image, link, etc.)
+- Welcome message on event (enter_session)
+- Media upload/get (temporary materials)
+- Message recall (2-minute window)
+- Customer basic info (batchget)
+- Kf account management (add, delete, update, list, add_contact_way)
+- Global error-code helpers and examples
+- Minimal dependencies with clear, typed requests/responses
 
-### Use Cases
+Important scope notes
 
-- Embed WeChat Kefu into your website/app as a unified customer support channel
-- Implement auto-reply and routing via backend APIs
-- Integrate with ticketing systems for session archiving and tracking
+- WeCom Kf vs Official Account/Mini Program tokens:
+  - Kf APIs require WeCom credentials: corpid (starts with ww) + WeChat Customer Service Secret (corpsecret).
+  - OA/MP appid/appsecret tokens are NOT accepted by Kf endpoints.
+- Token endpoints:
+  - WeCom (Kf): https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=ID&corpsecret=SECRET
+  - OA/MP: https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=APPID&secret=APPSECRET
+- Cache access_token and handle early invalidation (errcode 40014/40001).
 
----
+## Install / Setup
 
-## Quick Start (English)
+Add this crate to your Cargo.toml. If you’re using the repository directly, a typical local path dependency looks like:
 
-1. Enable and prepare
+    [dependencies]
+    wxkefu-rs = { path = "./wxkefu-rs" }
 
-- Ensure WeChat Kefu is enabled for your enterprise in WeCom admin
-- Configure your app, domain, and callback endpoints
-- Prepare credentials (example names; adapt to your project):
-  - `WXKF_CORP_ID` (Corp ID)
-  - `WXKF_APP_SECRET` (App Secret)
-  - `WXKF_TOKEN` (Callback token)
-  - `WXKF_AES_KEY` (Callback AES key)
+In your code, import with the underscore name (Rust turns '-' into '\_'):
 
-2. WeCom QR code login
+    use wxkefu_rs::{Auth, KfClient};
 
-- Render a WeCom login QR on your page/admin portal
-- User scans with WeCom and grants consent
-- Server validates the login state and establishes session/permissions
-- Bind agent accounts or routing rules if needed
+Environment variables used by examples:
 
-3. API integration
+- WeCom (Kf): WXKF_CORP_ID, WXKF_APP_SECRET
+- Callback development: WXKF_TOKEN, WXKF_AES_KEY
+- Other examples may use additional vars (e.g., WXKF_OPEN_KFID, WXKF_TOUSER, WXKF_MEDIA_ID, etc.)
 
-- Follow official docs to implement message send/receive, agent management, and session routing
-- Handle callbacks (messages, session events), then run your business logic (auto-reply, escalate to human agent, etc.)
+## Quick Start
 
-Docs and APIs:
+Minimal example: fetch a WeCom (Kf) access token.
 
-- Homepage: https://kf.weixin.qq.com/
-- API Docs: https://kf.weixin.qq.com/api/doc/path/93304
+    use wxkefu_rs::{Auth, KfClient};
 
-### Security and Compliance
+    #[tokio::main]
+    async fn main() -> anyhow::Result<()> {
+        let client = KfClient::default();
+        let token = client
+            .get_access_token(&Auth::WeCom {
+                corp_id: std::env::var("WXKF_CORP_ID")?,
+                corp_secret: std::env::var("WXKF_APP_SECRET")?,
+            })
+            .await?;
+        println!("access_token={}, expires_in={}", token.access_token, token.expires_in);
+        Ok(())
+    }
 
-- Keep enterprise/app secrets safe; never commit to VCS
-- Verify callback signatures and decrypt payloads per the official spec
-- Follow WeChat/WeCom platform policies and compliance requirements
+Send a simple text message (requires valid external_userid and open_kfid). See examples/send_text.rs for a full runnable sample.
 
-### Changelog (from official)
+    use wxkefu_rs::{Auth, KfClient};
+    use wxkefu_rs::send_msg::{SendMsgRequest, SendMsgPayload, TextContent};
 
-[Oct 9 Update]
+    #[tokio::main]
+    async fn main() -> anyhow::Result<()> {
+        let corp_id = std::env::var("WXKF_CORP_ID")?;
+        let corp_secret = std::env::var("WXKF_APP_SECRET")?;
+        let access = KfClient::default()
+            .get_access_token(&Auth::WeCom { corp_id, corp_secret })
+            .await?;
 
-- Rich entry points: Channels, Official Accounts, Mini Programs, Search, Pay receipts, and external apps/webpages
-- Consistent chat experience: user doesn’t need to add contact; receives message notifications in WeChat
-- API-based messaging: send/receive via API, manage agents; supports multi-agent collaboration and auto-replies
+        let req = SendMsgRequest {
+            touser: std::env::var("WXKF_TOUSER")?, // external_userid
+            open_kfid: std::env::var("WXKF_OPEN_KFID")?,
+            msgid: None,
+            payload: SendMsgPayload::Text { text: TextContent { content: "hello from wxkefu-rs".into() } },
+        };
+        let resp = KfClient::default().send_msg(&access.access_token, &req).await?;
+        println!("send_msg: errcode={}, errmsg={}", resp.errcode, resp.errmsg);
+        Ok(())
+    }
 
----
+Notes
 
-## FAQ (English)
+- Respect WeChat Kf delivery limits: Up to 5 messages within 48 hours after the user sends a message.
+- Recall is allowed only within 2 minutes for API-sent messages.
+- Temporary media_id is valid for 3 days.
 
-- Q: Is WeCom QR login required?
-  A: It’s recommended for centralized enterprise identity and agent permissions. WeChat QR login may also be supported depending on your compliance needs.
+## Key APIs (modules)
 
-- Q: How to handle callback encryption/decryption?
-  A: Use the official algorithm with `token` and `AES Key` to validate signatures and decrypt messages.
+Token and client
 
-- Q: Can I implement auto-replies or agent routing?
-  A: Yes. Process incoming messages/events and call APIs according to your routing policies.
+- token (re-exported at crate root)
+  - Auth (WeCom | OfficialAccount)
+  - KfClient
+    - get_access_token(&Auth) -> AccessToken
+  - Error / Result (unified error handling)
 
----
+Callback utilities (framework-agnostic)
+
+- callback
+  - verify_and_decrypt_echostr(...) // URL verification
+  - verify_and_decrypt_post_body(...) // handle POST callbacks
+  - decrypt_b64_message(...) // low-level AES helper
+
+Message sync (pull messages)
+
+- sync_msg
+  - KfClient::sync_msg(access_token, req) -> SyncMsgResponse
+  - Handles pagination via next_cursor/has_more
+
+Send messages
+
+- send_msg
+  - KfClient::send_msg(access_token, &SendMsgRequest) -> SendMsgResponse
+  - Supports text, image, voice, video, file, link, miniprogram, msgmenu, location, business_card, ca_link
+
+Welcome messages (on event)
+
+- send_msg_on_event
+  - KfClient::send_msg_on_event(access_token, &SendMsgOnEventRequest) -> ...
+  - Use the one-time welcome_code from the enter_session event
+
+Recall messages
+
+- recall_msg
+  - KfClient::recall_msg(access_token, &RecallMsgRequest) -> RecallMsgResponse
+  - Only for API-sent messages within 2 minutes
+
+Media management (temporary)
+
+- media
+  - KfClient::media_upload(access_token, media_type, filename, content_type, data) -> MediaUploadResponse
+  - KfClient::media_get(access_token, media_id, range) -> MediaGetOk
+  - Supports HTTP Range (206 Partial Content)
+
+Customer profiles
+
+- customer
+  - KfClient::customer_batchget(access_token, &CustomerBatchGetRequest) -> CustomerBatchGetResponse
+
+Kf account management
+
+- account
+  - KfClient::account_add(access_token, &AccountAddRequest) -> AccountAddResponse
+  - KfClient::account_del(access_token, &AccountDelRequest) -> AccountDelResponse
+  - KfClient::account_update(access_token, &AccountUpdateRequest) -> AccountUpdateResponse
+  - KfClient::account_list(access_token, &AccountListRequest) -> AccountListResponse
+  - KfClient::add_contact_way(access_token, &AddContactWayRequest) -> AddContactWayResponse
+
+Key generation (token, EncodingAESKey)
+
+- keygen
+  - generate_token(len)
+  - generate_encoding_aes_key()
+  - verify_encoding_aes_key(key)
+
+Global error helpers
+
+- errors
+  - explain(errcode, errmsg) -> String // one-line human-readable guidance
+  - lookup/hint_for/category_for/should_retry/should_refresh_token
+  - contains_wrong_json_format(errmsg) // detect “Warning: wrong json format.”
+
+## Examples
+
+Run any example with cargo run --example <name>. Supply required environment variables as described in the file headers.
+
+- Token
+  - examples/get_token.rs
+- Sending messages
+  - examples/send_text.rs
+  - examples/send_image.rs
+  - examples/send_link.rs
+  - examples/send_welcome_text.rs
+  - examples/send_welcome_menu.rs
+- Sync (pull) messages
+  - examples/pull_messages.rs
+- Recall
+  - examples/recall_msg.rs
+- Media
+  - examples/media_upload.rs
+  - examples/media_get.rs
+- Customer info
+  - examples/customer_batchget.rs
+- Kf account management
+  - examples/account_add.rs
+  - examples/account_del.rs
+  - examples/account_more.rs // update, list, add_contact_way
+- Callback utilities (echo + decrypt demo)
+  - examples/callback_server.rs
+- Keygen and error helpers
+  - examples/keygen_example.rs
+  - examples/error_help.rs
+
+More examples:
+See the examples/ directory for all runnable samples.
+
+## Best Practices
+
+- Cache access_token (typical 7200s). Implement auto-refresh and handle early invalidation (errcode 40014/40001).
+- Do not log secrets or tokens. Redact sensitive values.
+- Verify callback signatures and decrypt payloads per spec (SHA1 signature over token/timestamp/nonce/encrypt; AES-256-CBC).
+- Comply with Kf constraints:
+  - 48-hour + 5-message rule
+  - Recall only within 2 minutes
+  - Temporary media_id validity: 3 days
+- UnionID availability depends on developer account binding (see official docs). Third-party service providers may not receive unionid via Kf API.
 
 ## Contributing
 
-Issues and PRs are welcome. Please discuss major changes first to align direction.
+Issues and PRs welcome. For major changes, please start a discussion to align on direction.
 
 ## License
 
-Add a `LICENSE` file that matches your project’s preferred license (e.g., MIT/Apache-2.0).
-
-## Rust Example: Fetch Access Token (获取 token)
-
-Set credentials via environment variables:
-
-- Official Account / Mini Program: WX_APPID, WX_APPSECRET
-- WeCom (企业微信): WXKF_CORP_ID, WXKF_APP_SECRET
-
-```/dev/null/examples/get_token.rs#L1-40
-use wxkefu_rs::kf::{Auth, KfClient};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = KfClient::default();
-
-    // Official Account / Mini Program
-    if let (Ok(appid), Ok(secret)) = (
-        std::env::var("WX_APPID"),
-        std::env::var("WX_APPSECRET"),
-    ) {
-        let token = client
-            .get_access_token(&Auth::OfficialAccount { appid, secret })
-            .await?;
-        println!(
-            "OfficialAccount token: {}, expires_in: {}",
-            token.access_token, token.expires_in
-        );
-    }
-
-    // WeCom (企业微信)
-    if let (Ok(corp_id), Ok(corp_secret)) = (
-        std::env::var("WXKF_CORP_ID"),
-        std::env::var("WXKF_APP_SECRET"),
-    ) {
-        let token = client
-            .get_access_token(&Auth::WeCom { corp_id, corp_secret })
-            .await?;
-        println!(
-            "WeCom token: {}, expires_in: {}",
-            token.access_token, token.expires_in
-        );
-    }
-
-    Ok(())
-}
-```
+Add a LICENSE file (e.g., MIT/Apache-2.0) that suits your project’s needs.
