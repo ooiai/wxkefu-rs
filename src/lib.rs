@@ -131,11 +131,9 @@ Roadmap
 "#]
 
 pub mod token;
-pub use token::*;
+pub use token::{AccessToken, Auth, Error, KfClient, Result};
 
 pub mod callback;
-pub use callback::*;
-pub mod sync_msg;
-pub use sync_msg::*;
 pub mod keygen;
-pub use keygen::*;
+pub mod send_msg;
+pub mod sync_msg;

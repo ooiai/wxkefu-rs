@@ -1,6 +1,7 @@
 use dotenvy::dotenv;
 use std::env;
-use wxkefu_rs::{Auth, KfClient, MsgPayload, SyncMsgRequest};
+use wxkefu_rs::sync_msg::{MsgPayload, SyncMsgItem, SyncMsgRequest};
+use wxkefu_rs::{Auth, KfClient};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -122,7 +123,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_item(idx: usize, item: &wxkefu_rs::SyncMsgItem) {
+fn print_item(idx: usize, item: &SyncMsgItem) {
     println!(
         "  [{}] msgid={}, open_kfid={}, external_userid={:?}, send_time={}, origin={:?}",
         idx,
