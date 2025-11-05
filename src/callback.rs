@@ -169,19 +169,36 @@ impl CallbackCrypto {
     ) -> Result<Self, VerifyError> {
         let token = token.into();
         // Remove any kind of ASCII whitespace (space, tab, CR, LF, etc.)
+        // 1) Remove all ASCII whitespace (space/tab/CR/LF, etc.)
         let raw = encoding_aes_key.into();
-        let mut key_b64: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
-        // Base64 requires length % 4 == 0; the official key often omits trailing '='
-        while key_b64.len() % 4 != 0 {
-            key_b64.push('=');
+        let mut cleaned: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+
+        // 2) Strip any trailing '=' padding for a NO_PAD attempt first
+        while cleaned.ends_with('=') {
+            cleaned.pop();
         }
-        // Try decoding with padding first; if it fails, try without padding as a fallback.
-        let key = match BASE64.decode(key_b64.as_bytes()) {
+
+        // 3) Prepare a padded variant (append '=' until len % 4 == 0)
+        let mut padded = cleaned.clone();
+        while padded.len() % 4 != 0 {
+            padded.push('=');
+        }
+
+        // 4) Try decoding without padding first, then with padding
+        let key = match BASE64_NO_PAD.decode(cleaned.as_bytes()) {
             Ok(k) => k,
-            Err(_e) => match BASE64_NO_PAD.decode(key_b64.as_bytes()) {
+            Err(e1) => match BASE64.decode(padded.as_bytes()) {
                 Ok(k) => k,
                 Err(e2) => {
-                    let tail: String = key_b64
+                    let cleaned_tail: String = cleaned
+                        .chars()
+                        .rev()
+                        .take(6)
+                        .collect::<Vec<char>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                    let padded_tail: String = padded
                         .chars()
                         .rev()
                         .take(6)
@@ -190,10 +207,13 @@ impl CallbackCrypto {
                         .rev()
                         .collect();
                     return Err(VerifyError::BadEncodingAesKey(format!(
-                        "{}; cleaned_len={}; tail='{}' (tip: ensure no hidden whitespace/newlines; 43~44 chars are typical and padding is added automatically)",
+                        "{} (nopad_err: {}); cleaned_len={}; cleaned_tail='{}'; padded_len={}; padded_tail='{}' (tip: ensure no hidden whitespace/newlines; both no-pad and padded decoding were attempted)",
                         e2,
-                        key_b64.len(),
-                        tail
+                        e1,
+                        cleaned.len(),
+                        cleaned_tail,
+                        padded.len(),
+                        padded_tail
                     )));
                 }
             },
