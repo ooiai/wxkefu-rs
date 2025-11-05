@@ -10,7 +10,7 @@ use axum::{
 use dotenvy::dotenv;
 use serde::Deserialize;
 use std::{env, net::SocketAddr, sync::Arc};
-use wxkefu_rs::callback;
+use wxkefu_rs::callback::{self, KfEvent, KfMessage};
 
 #[derive(Clone)]
 struct AppState {
@@ -311,6 +311,123 @@ async fn callback_post(
             // Try to extract event 'token' (for sys_msg usage; valid for ~10 minutes).
             if let Some(t) = callback::extract_event_token(&plaintext) {
                 println!("Event token: {}", t);
+            }
+
+            // Parse plaintext into typed message and log essential fields.
+            if let Ok(msg) = callback::parse_kf_plaintext(&plaintext) {
+                match msg {
+                    KfMessage::Text(t) => {
+                        println!(
+                            "Parsed: text content='{}' menu_id={:?}",
+                            t.content, t.menu_id
+                        );
+                    }
+                    KfMessage::Image(m) => println!("Parsed: image media_id='{}'", m.media_id),
+                    KfMessage::Voice(m) => println!("Parsed: voice media_id='{}'", m.media_id),
+                    KfMessage::Video(m) => println!("Parsed: video media_id='{}'", m.media_id),
+                    KfMessage::File(m) => println!("Parsed: file media_id='{}'", m.media_id),
+                    KfMessage::Location(loc) => {
+                        println!(
+                            "Parsed: location lat={} lng={} name={:?} address={:?}",
+                            loc.latitude, loc.longitude, loc.name, loc.address
+                        );
+                    }
+                    KfMessage::Miniprogram(mp) => {
+                        println!(
+                            "Parsed: miniprogram title={:?} appid={:?} pagepath={:?} thumb_media_id={:?}",
+                            mp.title, mp.appid, mp.pagepath, mp.thumb_media_id
+                        );
+                    }
+                    KfMessage::ChannelsShopProduct(p) => {
+                        println!(
+                            "Parsed: channels_shop_product id={:?} title={:?} price={:?}",
+                            p.product_id, p.title, p.sales_price
+                        );
+                    }
+                    KfMessage::ChannelsShopOrder(o) => {
+                        println!(
+                            "Parsed: channels_shop_order order_id={:?} titles={:?} state={:?}",
+                            o.order_id, o.product_titles, o.state
+                        );
+                    }
+                    KfMessage::MergedMsg(m) => {
+                        println!(
+                            "Parsed: merged_msg title={:?} items={}",
+                            m.title,
+                            m.item.len()
+                        );
+                    }
+                    KfMessage::Channels(c) => {
+                        println!(
+                            "Parsed: channels sub_type={:?} nickname={:?} title={:?}",
+                            c.sub_type, c.nickname, c.title
+                        );
+                    }
+                    KfMessage::Note => println!("Parsed: note"),
+                    KfMessage::Event(ev) => match ev {
+                        KfEvent::EnterSession {
+                            open_kfid,
+                            external_userid,
+                            scene,
+                            scene_param,
+                            welcome_code,
+                            wechat_channels_nickname,
+                            wechat_channels_scene,
+                        } => {
+                            println!(
+                                "Parsed: event enter_session open_kfid={:?} external_userid={:?} scene={:?} scene_param={:?} welcome_code={:?} wc_nickname={:?} wc_scene={:?}",
+                                open_kfid,
+                                external_userid,
+                                scene,
+                                scene_param,
+                                welcome_code,
+                                wechat_channels_nickname,
+                                wechat_channels_scene
+                            );
+                        }
+                        KfEvent::MsgSendFail {
+                            open_kfid,
+                            external_userid,
+                            fail_msgid,
+                            fail_type,
+                        } => {
+                            println!(
+                                "Parsed: event msg_send_fail open_kfid={:?} external_userid={:?} fail_msgid={:?} fail_type={:?}",
+                                open_kfid, external_userid, fail_msgid, fail_type
+                            );
+                        }
+                        KfEvent::UserRecallMsg {
+                            open_kfid,
+                            external_userid,
+                            recall_msgid,
+                        } => {
+                            println!(
+                                "Parsed: event user_recall_msg open_kfid={:?} external_userid={:?} recall_msgid={:?}",
+                                open_kfid, external_userid, recall_msgid
+                            );
+                        }
+                        KfEvent::KfMsgOrEventNotification {
+                            to_user_name,
+                            create_time,
+                            token,
+                            open_kfid,
+                        } => {
+                            println!(
+                                "Parsed: event kf_msg_or_event to_user_name={:?} create_time={:?} token={:?} open_kfid={:?}",
+                                to_user_name, create_time, token, open_kfid
+                            );
+                        }
+                        KfEvent::Unknown { event_type, .. } => {
+                            println!("Parsed: event unknown type={:?}", event_type);
+                        }
+                    },
+                    KfMessage::UnknownJson { msgtype, .. } => {
+                        println!("Parsed: unknown json msgtype='{}'", msgtype);
+                    }
+                    KfMessage::UnknownXml { name, .. } => {
+                        println!("Parsed: unknown xml '{}'", name);
+                    }
+                }
             }
 
             // Per WeChat convention, responding with "success" acknowledges receipt.

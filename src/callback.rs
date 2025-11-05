@@ -481,3 +481,492 @@ pub fn verify_encoding_aes_key(key: &str) -> bool {
         Err(_) => false,
     }
 }
+
+/// Typed message models for Kf plaintext (JSON or XML).
+#[derive(Debug, Clone)]
+pub enum KfMessage {
+    Text(TextMsg),
+    Image(MediaMsg),
+    Voice(MediaMsg),
+    Video(MediaMsg),
+    File(MediaMsg),
+    Location(LocationMsg),
+    Miniprogram(MiniprogramMsg),
+    ChannelsShopProduct(ChannelsShopProductMsg),
+    ChannelsShopOrder(ChannelsShopOrderMsg),
+    MergedMsg(MergedMsg),
+    Channels(ChannelsMsg),
+    Note,
+    Event(KfEvent),
+    UnknownJson {
+        msgtype: String,
+        raw: serde_json::Value,
+    },
+    UnknownXml {
+        name: String,
+        raw: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct TextMsg {
+    pub content: String,
+    pub menu_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MediaMsg {
+    pub media_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocationMsg {
+    pub latitude: f64,
+    pub longitude: f64,
+    pub name: Option<String>,
+    pub address: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MiniprogramMsg {
+    pub title: Option<String>,
+    pub appid: Option<String>,
+    pub pagepath: Option<String>,
+    pub thumb_media_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelsShopProductMsg {
+    pub product_id: Option<String>,
+    pub head_image: Option<String>,
+    pub title: Option<String>,
+    pub sales_price: Option<String>,
+    pub shop_nickname: Option<String>,
+    pub shop_head_image: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelsShopOrderMsg {
+    pub order_id: Option<String>,
+    pub product_titles: Option<String>,
+    pub price_wording: Option<String>,
+    pub state: Option<String>,
+    pub image_url: Option<String>,
+    pub shop_nickname: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MergedItem {
+    pub send_time: Option<u64>,
+    pub msgtype: Option<String>,
+    pub sender_name: Option<String>,
+    pub msg_content: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MergedMsg {
+    pub title: Option<String>,
+    pub item: Vec<MergedItem>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelsMsg {
+    pub sub_type: Option<u32>,
+    pub nickname: Option<String>,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum KfEvent {
+    EnterSession {
+        open_kfid: Option<String>,
+        external_userid: Option<String>,
+        scene: Option<String>,
+        scene_param: Option<String>,
+        welcome_code: Option<String>,
+        wechat_channels_nickname: Option<String>,
+        wechat_channels_scene: Option<u32>,
+    },
+    MsgSendFail {
+        open_kfid: Option<String>,
+        external_userid: Option<String>,
+        fail_msgid: Option<String>,
+        fail_type: Option<u32>,
+    },
+    UserRecallMsg {
+        open_kfid: Option<String>,
+        external_userid: Option<String>,
+        recall_msgid: Option<String>,
+    },
+    KfMsgOrEventNotification {
+        to_user_name: Option<String>,
+        create_time: Option<u64>,
+        token: Option<String>,
+        open_kfid: Option<String>,
+    },
+    Unknown {
+        event_type: Option<String>,
+        raw: serde_json::Value,
+    },
+}
+
+/// Parse Kf plaintext (JSON preferred, XML fallback) into typed models.
+pub fn parse_kf_plaintext(plaintext: &str) -> Result<KfMessage, CallbackError> {
+    let s = plaintext.trim();
+    if s.starts_with('{') || s.starts_with('[') {
+        parse_kf_json(plaintext)
+    } else {
+        parse_kf_xml(plaintext)
+    }
+}
+
+fn parse_kf_json(plaintext: &str) -> Result<KfMessage, CallbackError> {
+    let v: serde_json::Value =
+        serde_json::from_str(plaintext).map_err(|e| CallbackError::Json(e.to_string()))?;
+    let msgtype = v
+        .get("msgtype")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    match msgtype.as_str() {
+        "text" => {
+            let text = v.get("text").cloned().unwrap_or_default();
+            let content = text
+                .get("content")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let menu_id = text
+                .get("menu_id")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            Ok(KfMessage::Text(TextMsg { content, menu_id }))
+        }
+        "image" => {
+            let image = v.get("image").cloned().unwrap_or_default();
+            let media_id = image
+                .get("media_id")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string();
+            Ok(KfMessage::Image(MediaMsg { media_id }))
+        }
+        "voice" => {
+            let voice = v.get("voice").cloned().unwrap_or_default();
+            let media_id = voice
+                .get("media_id")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string();
+            Ok(KfMessage::Voice(MediaMsg { media_id }))
+        }
+        "video" => {
+            let video = v.get("video").cloned().unwrap_or_default();
+            let media_id = video
+                .get("media_id")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string();
+            Ok(KfMessage::Video(MediaMsg { media_id }))
+        }
+        "file" => {
+            let file = v.get("file").cloned().unwrap_or_default();
+            let media_id = file
+                .get("media_id")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string();
+            Ok(KfMessage::File(MediaMsg { media_id }))
+        }
+        "location" => {
+            let loc = v.get("location").cloned().unwrap_or_default();
+            let latitude = loc
+                .get("latitude")
+                .and_then(|x| x.as_f64())
+                .unwrap_or_default();
+            let longitude = loc
+                .get("longitude")
+                .and_then(|x| x.as_f64())
+                .unwrap_or_default();
+            let name = loc
+                .get("name")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            let address = loc
+                .get("address")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            Ok(KfMessage::Location(LocationMsg {
+                latitude,
+                longitude,
+                name,
+                address,
+            }))
+        }
+        "miniprogram" => {
+            let mp = v.get("miniprogram").cloned().unwrap_or_default();
+            let title = mp
+                .get("title")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            let appid = mp
+                .get("appid")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            let pagepath = mp
+                .get("pagepath")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            let thumb_media_id = mp
+                .get("thumb_media_id")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            Ok(KfMessage::Miniprogram(MiniprogramMsg {
+                title,
+                appid,
+                pagepath,
+                thumb_media_id,
+            }))
+        }
+        "channels_shop_product" => {
+            let p = v.get("channels_shop_product").cloned().unwrap_or_default();
+            Ok(KfMessage::ChannelsShopProduct(ChannelsShopProductMsg {
+                product_id: p
+                    .get("product_id")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
+                head_image: p
+                    .get("head_image")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
+                title: p
+                    .get("title")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
+                sales_price: p
+                    .get("sales_price")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
+                shop_nickname: p
+                    .get("shop_nickname")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
+                shop_head_image: p
+                    .get("shop_head_image")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
+            }))
+        }
+        "channels_shop_order" => {
+            let o = v.get("channels_shop_order").cloned().unwrap_or_default();
+            Ok(KfMessage::ChannelsShopOrder(ChannelsShopOrderMsg {
+                order_id: o
+                    .get("order_id")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
+                product_titles: o
+                    .get("product_titles")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
+                price_wording: o
+                    .get("price_wording")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
+                state: o
+                    .get("state")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
+                image_url: o
+                    .get("image_url")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
+                shop_nickname: o
+                    .get("shop_nickname")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
+            }))
+        }
+        "merged_msg" => {
+            let m = v.get("merged_msg").cloned().unwrap_or_default();
+            let title = m
+                .get("title")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            let mut items = Vec::new();
+            if let Some(arr) = m.get("item").and_then(|x| x.as_array()) {
+                for it in arr {
+                    items.push(MergedItem {
+                        send_time: it.get("send_time").and_then(|x| x.as_u64()),
+                        msgtype: it
+                            .get("msgtype")
+                            .and_then(|x| x.as_str())
+                            .map(|s| s.to_string()),
+                        sender_name: it
+                            .get("sender_name")
+                            .and_then(|x| x.as_str())
+                            .map(|s| s.to_string()),
+                        msg_content: it
+                            .get("msg_content")
+                            .and_then(|x| x.as_str())
+                            .map(|s| s.to_string()),
+                    });
+                }
+            }
+            Ok(KfMessage::MergedMsg(MergedMsg { title, item: items }))
+        }
+        "channels" => {
+            let c = v.get("channels").cloned().unwrap_or_default();
+            Ok(KfMessage::Channels(ChannelsMsg {
+                sub_type: c.get("sub_type").and_then(|x| x.as_u64()).map(|n| n as u32),
+                nickname: c
+                    .get("nickname")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
+                title: c
+                    .get("title")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
+            }))
+        }
+        "note" => Ok(KfMessage::Note),
+        "event" => {
+            let ev = v.get("event").cloned().unwrap_or_default();
+            let et = ev
+                .get("event_type")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default();
+            let event = match et {
+                "enter_session" => KfEvent::EnterSession {
+                    open_kfid: ev
+                        .get("open_kfid")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string()),
+                    external_userid: ev
+                        .get("external_userid")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string()),
+                    scene: ev
+                        .get("scene")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string()),
+                    scene_param: ev
+                        .get("scene_param")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string()),
+                    welcome_code: ev
+                        .get("welcome_code")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string()),
+                    wechat_channels_nickname: ev
+                        .get("wechat_channels")
+                        .and_then(|wc| wc.get("nickname"))
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string()),
+                    wechat_channels_scene: ev
+                        .get("wechat_channels")
+                        .and_then(|wc| wc.get("scene"))
+                        .and_then(|x| x.as_u64())
+                        .map(|n| n as u32),
+                },
+                "msg_send_fail" => KfEvent::MsgSendFail {
+                    open_kfid: ev
+                        .get("open_kfid")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string()),
+                    external_userid: ev
+                        .get("external_userid")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string()),
+                    fail_msgid: ev
+                        .get("fail_msgid")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string()),
+                    fail_type: ev
+                        .get("fail_type")
+                        .and_then(|x| x.as_u64())
+                        .map(|n| n as u32),
+                },
+                "user_recall_msg" => KfEvent::UserRecallMsg {
+                    open_kfid: ev
+                        .get("open_kfid")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string()),
+                    external_userid: ev
+                        .get("external_userid")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string()),
+                    recall_msgid: ev
+                        .get("recall_msgid")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string()),
+                },
+                _ => KfEvent::Unknown {
+                    event_type: Some(et.to_string()),
+                    raw: ev,
+                },
+            };
+            Ok(KfMessage::Event(event))
+        }
+        _ => Ok(KfMessage::UnknownJson { msgtype, raw: v }),
+    }
+}
+
+fn parse_kf_xml(plaintext: &str) -> Result<KfMessage, CallbackError> {
+    // Minimal XML event parsing for <MsgType>event</MsgType> with <Event>kf_msg_or_event</Event>
+    let msg_type = get_xml_text(plaintext, "MsgType")
+        .or_else(|| get_xml_cdata(plaintext, "MsgType"))
+        .unwrap_or_default();
+    if msg_type.eq_ignore_ascii_case("event") {
+        let ev = get_xml_text(plaintext, "Event")
+            .or_else(|| get_xml_cdata(plaintext, "Event"))
+            .unwrap_or_default();
+        if ev == "kf_msg_or_event" {
+            let to_user_name = get_xml_text(plaintext, "ToUserName")
+                .or_else(|| get_xml_cdata(plaintext, "ToUserName"));
+            let create_time =
+                get_xml_text(plaintext, "CreateTime").and_then(|s| s.parse::<u64>().ok());
+            let token = extract_token_from_xml(plaintext);
+            let open_kfid = get_xml_text(plaintext, "OpenKfId")
+                .or_else(|| get_xml_cdata(plaintext, "OpenKfId"));
+            return Ok(KfMessage::Event(KfEvent::KfMsgOrEventNotification {
+                to_user_name,
+                create_time,
+                token,
+                open_kfid,
+            }));
+        }
+        return Ok(KfMessage::UnknownXml {
+            name: ev,
+            raw: plaintext.to_string(),
+        });
+    }
+    Ok(KfMessage::UnknownXml {
+        name: msg_type,
+        raw: plaintext.to_string(),
+    })
+}
+
+fn get_xml_text(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    if let (Some(s), Some(e)) = (xml.find(&open), xml.find(&close)) {
+        let start = s + open.len();
+        if e > start {
+            return Some(xml[start..e].to_string());
+        }
+    }
+    None
+}
+
+fn get_xml_cdata(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}><![CDATA[");
+    let close = format!("]]></{tag}>");
+    if let (Some(s), Some(e)) = (xml.find(&open), xml.find(&close)) {
+        let start = s + open.len();
+        if e > start {
+            return Some(xml[start..e].to_string());
+        }
+    }
+    None
+}
