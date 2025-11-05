@@ -31,11 +31,11 @@ pub fn generate_token(len: usize) -> String {
     out
 }
 
-/// Generate a 43-character EncodingAESKey (Base64 without padding) derived from 32 random bytes.
-/// Appending a single '=' must decode back to 32 bytes.
+/// Generate a 43-character EncodingAESKey (alphanumeric only) derived from 32 random bytes.
+/// Appending a single '=' must decode back to 32 bytes when treated as standard Base64.
+/// Per WeChat spec: "由英文或数字组成" means ONLY [A-Za-z0-9], no +/ symbols.
+/// Uses rejection sampling to ensure the Base64 output contains no '+' or '/' characters.
 pub fn generate_encoding_aes_key() -> String {
-    // Generate until Base64 (without '=') is 43 chars and contains only [A-Za-z0-9],
-    // matching the official requirement for EncodingAESKey.
     loop {
         let mut key_bytes = [0u8; 32];
         fill_entropy(&mut key_bytes);
@@ -43,6 +43,7 @@ pub fn generate_encoding_aes_key() -> String {
         let b64 = base64_encode(&key_bytes);
         let trimmed = b64.trim_end_matches('=').to_string();
 
+        // WeChat requires exactly 43 chars with only alphanumeric characters (no +/)
         if trimmed.len() == 43 && trimmed.bytes().all(|b| b.is_ascii_alphanumeric()) {
             return trimmed;
         }
@@ -262,9 +263,12 @@ mod tests {
     fn encoding_aes_key_is_base64_charset() {
         let key = generate_encoding_aes_key();
         assert_eq!(key.len(), 43);
-        // Ensure key only contains letters/digits (as required by official spec)
-        assert!(key.bytes().all(|b| (b'A'..=b'Z').contains(&b)
-            || (b'a'..=b'z').contains(&b)
-            || (b'0'..=b'9').contains(&b)));
+        // Ensure key only contains alphanumeric chars (as required by WeChat: "英文或数字")
+        assert!(key.bytes().all(|b| b.is_ascii_alphanumeric()));
+
+        // Verify it decodes correctly as Base64 when padded
+        let with_pad = format!("{key}=");
+        let raw = base64_decode(&with_pad).expect("decode");
+        assert_eq!(raw.len(), 32);
     }
 }

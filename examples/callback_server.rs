@@ -48,6 +48,22 @@ async fn main() -> anyhow::Result<()> {
 
     let _ = dotenv();
 
+    // Print raw env vars for debugging
+    eprintln!("=== ENV VAR DEBUG ===");
+    match env::var("WXKF_TOKEN") {
+        Ok(ref v) => eprintln!("WXKF_TOKEN from env: len={}, value='{}'", v.len(), v),
+        Err(e) => eprintln!("WXKF_TOKEN from env: ERROR {}", e),
+    }
+    match env::var("WXKF_ENCODING_AES_KEY") {
+        Ok(ref v) => eprintln!(
+            "WXKF_ENCODING_AES_KEY from env: len={}, value='{}'",
+            v.len(),
+            v
+        ),
+        Err(e) => eprintln!("WXKF_ENCODING_AES_KEY from env: ERROR {}", e),
+    }
+    eprintln!("=====================");
+
     let token = env::var("WXKF_TOKEN")
         .expect("Please set WXKF_TOKEN to the callback token you configured in Kf admin.")
         .trim()
@@ -55,6 +71,27 @@ async fn main() -> anyhow::Result<()> {
     let encoding_aes_key = env::var("WXKF_ENCODING_AES_KEY").expect(
         "Please set WXKF_ENCODING_AES_KEY to the 43-char EncodingAESKey from Kf admin (Developer Config).",
     ).trim().to_string();
+
+    // Print AES key fingerprint for troubleshooting
+    match callback::derive_key_iv(&encoding_aes_key) {
+        Ok((key, iv)) => {
+            eprintln!("AES key derived successfully: {} bytes", key.len());
+            eprintln!(
+                "AES key fingerprint: {:02x}{:02x}{:02x}{:02x}...{:02x}{:02x}{:02x}{:02x}",
+                key[0], key[1], key[2], key[3], key[28], key[29], key[30], key[31]
+            );
+            eprintln!(
+                "AES IV fingerprint: {:02x}{:02x}{:02x}{:02x}...{:02x}{:02x}{:02x}{:02x}",
+                iv[0], iv[1], iv[2], iv[3], iv[12], iv[13], iv[14], iv[15]
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "ERROR: Failed to derive AES key from WXKF_ENCODING_AES_KEY: {}",
+                e
+            );
+        }
+    }
     // Validate EncodingAESKey format early to surface misconfiguration quickly.
     if !callback::verify_encoding_aes_key(&encoding_aes_key) {
         eprintln!(
@@ -128,54 +165,14 @@ async fn callback_get(
             echo.as_str()
         };
         eprintln!("echo info: len={}, tail='{}'", elen, etail);
-        // Token fingerprint to ensure correct token is used (length and head/tail only).
-        let tlen = state.token.len();
-        let thead = &state.token[..tlen.min(4)];
-        let ttail = &state.token[tlen.saturating_sub(4)..];
-        eprintln!(
-            "token dbg: len={}, head='{}', tail='{}'",
-            tlen, thead, ttail
-        );
 
-        // Compute signatures using the raw echostr as it appears in the OriginalUri (percent-encoded).
         let raw_uri_str = original_uri.to_string();
         let raw_echostr_opt = raw_uri_str
             .split('?')
             .nth(1)
             .and_then(|q| q.split('&').find(|kv| kv.starts_with("echostr=")))
             .map(|kv| kv["echostr=".len()..].to_string());
-        if let Some(raw_echostr) = raw_echostr_opt.as_deref() {
-            let raw_tail = if raw_echostr.len() >= 4 {
-                &raw_echostr[raw_echostr.len() - 4..]
-            } else {
-                raw_echostr
-            };
-            let calc_sorted_raw = callback::sha1_signature(&[&state.token, ts, nonce, raw_echostr]);
-            let calc_concat_raw =
-                callback::sha1_signature_concat(&[&state.token, ts, nonce, raw_echostr]);
-            eprintln!(
-                "sig dbg (raw echostr): sorted_raw={}, concat_raw={}, raw_tail='{}'",
-                calc_sorted_raw, calc_concat_raw, raw_tail
-            );
-        }
-        // Additional signature diagnostics to help identify mismatches.
-        let echo_norm = echo.replace(' ', "+");
-        let calc_sorted = callback::sha1_signature(&[&state.token, ts, nonce, &echo_norm]);
-        let calc_concat = callback::sha1_signature_concat(&[&state.token, ts, nonce, &echo_norm]);
-        let ntail = if echo_norm.len() >= 4 {
-            &echo_norm[echo_norm.len() - 4..]
-        } else {
-            echo_norm.as_str()
-        };
-        eprintln!(
-            "sig dbg: provided={}, sorted={}, concat={}, ts={}, nonce_len={}, echo_norm_tail='{}'",
-            sig,
-            calc_sorted,
-            calc_concat,
-            ts,
-            nonce.len(),
-            ntail
-        );
+
         // Use shared helper which verifies signature and decrypts (handles URL-safe base64 and padding).
         match callback::verify_and_decrypt_echostr_candidates(
             &state.token,
@@ -213,32 +210,24 @@ async fn callback_get(
                         }
                     }
                 }
-                {
-                    let resp_body = "decrypt error";
-                    eprintln!("GET /callback response: {}", resp_body);
-                    (StatusCode::BAD_REQUEST, resp_body).into_response()
-                }
+                let resp_body = "decrypt error";
+                eprintln!("GET /callback response: {}", resp_body);
+                (StatusCode::BAD_REQUEST, resp_body).into_response()
             }
         }
     } else if let (Some(sig), Some(echo)) = (&q.signature, &q.echostr) {
         // Unencrypted URL verification (OA style)
         if !callback::verify_url_signature(&state.token, ts, nonce, sig) {
-            {
-                let resp_body = "signature mismatch";
-                eprintln!("GET /callback response: {}", resp_body);
-                return (StatusCode::FORBIDDEN, resp_body).into_response();
-            }
-        }
-        {
-            println!("GET /callback response: {}", echo);
-            echo.clone().into_response()
-        }
-    } else {
-        {
-            let resp_body = "missing signature/echostr";
+            let resp_body = "signature mismatch";
             eprintln!("GET /callback response: {}", resp_body);
-            (StatusCode::BAD_REQUEST, resp_body).into_response()
+            return (StatusCode::FORBIDDEN, resp_body).into_response();
         }
+        println!("GET /callback response: {}", echo);
+        echo.clone().into_response()
+    } else {
+        let resp_body = "missing signature/echostr";
+        eprintln!("GET /callback response: {}", resp_body);
+        (StatusCode::BAD_REQUEST, resp_body).into_response()
     }
 }
 
@@ -268,6 +257,12 @@ async fn callback_post(
         }
     };
 
+    eprintln!("POST body length: {}", body_str.len());
+    eprintln!(
+        "POST body (first 200 chars): {}",
+        &body_str.chars().take(200).collect::<String>()
+    );
+
     // Debug: log Encrypt field info from POST body before verify/decrypt
     let enc_dbg = match callback::detect_format(body_str.as_bytes()) {
         callback::CallbackFormat::Xml => callback::extract_encrypt_from_xml(body_str),
@@ -279,7 +274,11 @@ async fn callback_post(
         Some(enc) => {
             let elen = enc.len();
             let etail = if elen >= 4 { &enc[elen - 4..] } else { enc };
-            eprintln!("POST body Encrypt info: len={}, tail='{}'", elen, etail);
+            let ehead = if elen >= 40 { &enc[..40] } else { enc };
+            eprintln!(
+                "POST body Encrypt info: len={}, head='{}...', tail='{}'",
+                elen, ehead, etail
+            );
         }
         None => {
             eprintln!("POST body Encrypt info: not found");
@@ -449,19 +448,15 @@ async fn callback_post(
             }
 
             // Per WeChat convention, responding with "success" acknowledges receipt.
-            {
-                let resp_body = "success";
-                println!("POST /callback response: {}", resp_body);
-                resp_body.into_response()
-            }
+            let resp_body = "success";
+            println!("POST /callback response: {}", resp_body);
+            resp_body.into_response()
         }
         Err(e) => {
             eprintln!("callback decrypt/verify error: {e}");
-            {
-                let resp_body = "decrypt/verify error";
-                eprintln!("POST /callback response: {}", resp_body);
-                (StatusCode::BAD_REQUEST, resp_body).into_response()
-            }
+            let resp_body = "decrypt/verify error";
+            eprintln!("POST /callback response: {}", resp_body);
+            (StatusCode::BAD_REQUEST, resp_body).into_response()
         }
     }
 }
