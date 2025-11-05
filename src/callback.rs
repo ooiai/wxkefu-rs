@@ -405,3 +405,54 @@ pub fn verify_plain_url_echostr(
         Err(CallbackError::SignatureMismatch)
     }
 }
+
+/// Extract the short-lived event token (valid for ~10 minutes) from decrypted plaintext.
+/// Supports both JSON and XML payloads:
+/// - JSON: looks for "token" (lowercase) or "Token"
+/// - XML: looks for <Token>...</Token> or CDATA form <Token><![CDATA[...]]></Token>
+pub fn extract_event_token(plaintext: &str) -> Option<String> {
+    // Try JSON first
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(plaintext) {
+        if let Some(t) = v
+            .get("token")
+            .and_then(|x| x.as_str())
+            .or_else(|| v.get("Token").and_then(|x| x.as_str()))
+        {
+            return Some(t.to_string());
+        }
+    }
+    // Fallback to XML
+    extract_token_from_xml(plaintext)
+}
+
+/// Extract <Token>...</Token> or its CDATA variant from an XML plaintext.
+pub fn extract_token_from_xml(xml: &str) -> Option<String> {
+    // CDATA form
+    if let (Some(s), Some(e)) = (xml.find("<Token><![CDATA["), xml.find("]]></Token>")) {
+        let start = s + "<Token><![CDATA[".len();
+        if e > start {
+            return Some(xml[start..e].to_string());
+        }
+    }
+    // Plain text form
+    if let (Some(s), Some(e)) = (xml.find("<Token>"), xml.find("</Token>")) {
+        let start = s + "<Token>".len();
+        if e > start {
+            return Some(xml[start..e].to_string());
+        }
+    }
+    None
+}
+
+/// Verify that the encoding AES key is valid.
+pub fn verify_encoding_aes_key(key: &str) -> bool {
+    // WeChat Kf requires a 43-character Base64 (no padding) string that decodes to 32 bytes after appending '='.
+    if key.trim().len() != 43 {
+        return false;
+    }
+    let with_pad = format!("{key}=");
+    match BASE64.decode(with_pad.as_bytes()) {
+        Ok(bytes) => bytes.len() == 32,
+        Err(_) => false,
+    }
+}

@@ -7,23 +7,10 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use dotenvy::dotenv;
 use serde::Deserialize;
 use std::{env, net::SocketAddr, sync::Arc};
 use wxkefu_rs::callback;
-
-fn verify_encoding_aes_key(key: &str) -> bool {
-    // WeChat Kf requires a 43-character Base64 (no padding) string that decodes to 32 bytes after appending '='.
-    if key.trim().len() != 43 {
-        return false;
-    }
-    let with_pad = format!("{key}=");
-    match BASE64.decode(with_pad.as_bytes()) {
-        Ok(bytes) => bytes.len() == 32,
-        Err(_) => false,
-    }
-}
 
 #[derive(Clone)]
 struct AppState {
@@ -69,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
         "Please set WXKF_ENCODING_AES_KEY to the 43-char EncodingAESKey from Kf admin (Developer Config).",
     ).trim().to_string();
     // Validate EncodingAESKey format early to surface misconfiguration quickly.
-    if !verify_encoding_aes_key(&encoding_aes_key) {
+    if !callback::verify_encoding_aes_key(&encoding_aes_key) {
         eprintln!(
             "Warning: WXKF_ENCODING_AES_KEY appears invalid (must be 43 chars and decode to 32 bytes). The server will continue, but decryption will likely fail."
         );
@@ -261,6 +248,11 @@ async fn callback_post(
             // For Kf, this is typically JSON. Print it for demo purposes.
             // In production, parse it and implement your business logic.
             println!("Decrypted Kf message:\n{}", plaintext);
+
+            // Try to extract event 'token' (for sys_msg usage; valid for ~10 minutes).
+            if let Some(t) = callback::extract_event_token(&plaintext) {
+                println!("Event token: {}", t);
+            }
 
             // Per WeChat convention, responding with "success" acknowledges receipt.
             "success".into_response()
