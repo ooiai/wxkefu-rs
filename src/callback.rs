@@ -83,8 +83,14 @@ pub fn sha1_signature_concat(parts: &[&str]) -> String {
 
 /// Verify message signature (includes encrypt parameter).
 ///
-/// Accept both sorted and concatenated forms; also normalize encrypt by treating spaces as '+'
-/// to tolerate proxies that turned '+' into ' '.
+/// Accept both sorted and concatenated forms; be liberal in what we accept by trying multiple
+/// normalization variants of `encrypt` before computing SHA1:
+/// - as-is
+/// - spaces replaced by '+'
+/// - URL percent-decoded
+/// - URL percent-decoded, then spaces replaced by '+'
+/// For each of the above, also try mapping URL-safe Base64 ('-' -> '+', '_' -> '/') to tolerate
+/// proxies that rewrote characters.
 pub fn verify_msg_signature(
     token: &str,
     timestamp: &str,
@@ -92,10 +98,77 @@ pub fn verify_msg_signature(
     encrypt: &str,
     signature: &str,
 ) -> bool {
-    let encrypt_norm = encrypt.replace(' ', "+");
-    let calc_sorted = sha1_signature(&[token, timestamp, nonce, &encrypt_norm]);
-    let calc_concat = sha1_signature_concat(&[token, timestamp, nonce, &encrypt_norm]);
-    calc_sorted.eq_ignore_ascii_case(signature) || calc_concat.eq_ignore_ascii_case(signature)
+    // Minimal percent-decoder (does not transform '+').
+    fn percent_decode(input: &str) -> Option<String> {
+        let b = input.as_bytes();
+        let mut out = Vec::with_capacity(b.len());
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'%' && i + 2 < b.len() {
+                let h1 = b[i + 1] as char;
+                let h2 = b[i + 2] as char;
+                let v1 = h1.to_digit(16)?;
+                let v2 = h2.to_digit(16)?;
+                out.push((v1 * 16 + v2) as u8);
+                i += 3;
+            } else {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8(out).ok()
+    }
+
+    fn urlsafe_to_std(s: &str) -> String {
+        s.replace('-', "+").replace('_', "/")
+    }
+
+    let mut candidates: Vec<String> = Vec::new();
+
+    // Base variants
+    let base = encrypt.to_string();
+    candidates.push(base.clone());
+    candidates.push(base.replace(' ', "+"));
+
+    // Percent-decoded variants
+    if let Some(dec) = percent_decode(&base) {
+        candidates.push(dec.clone());
+        candidates.push(dec.replace(' ', "+"));
+    }
+
+    // URL-safe base64 mapped variants
+    let mut more = Vec::new();
+    for c in &candidates {
+        let mapped = urlsafe_to_std(c);
+        if mapped != *c {
+            more.push(mapped);
+        }
+    }
+    candidates.extend(more);
+
+    // Deduplicate to avoid redundant hashing in pathological cases
+    // (small N, so O(N^2) is fine here).
+    let mut uniq: Vec<String> = Vec::new();
+    'outer: for c in candidates {
+        for u in &uniq {
+            if u == &c {
+                continue 'outer;
+            }
+        }
+        uniq.push(c);
+    }
+
+    for c in uniq {
+        let calc_sorted = sha1_signature(&[token, timestamp, nonce, &c]);
+        if calc_sorted.eq_ignore_ascii_case(signature) {
+            return true;
+        }
+        let calc_concat = sha1_signature_concat(&[token, timestamp, nonce, &c]);
+        if calc_concat.eq_ignore_ascii_case(signature) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Decode EncodingAESKey (43 chars).
