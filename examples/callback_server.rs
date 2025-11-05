@@ -133,6 +133,37 @@ async fn callback_get(
             echo.as_str()
         };
         eprintln!("echo info: len={}, tail='{}'", elen, etail);
+        // Token fingerprint to ensure correct token is used (length and head/tail only).
+        let tlen = state.token.len();
+        let thead = &state.token[..tlen.min(4)];
+        let ttail = &state.token[tlen.saturating_sub(4)..];
+        eprintln!(
+            "token dbg: len={}, head='{}', tail='{}'",
+            tlen, thead, ttail
+        );
+
+        // Compute signatures using the raw echostr as it appears in the OriginalUri (percent-encoded).
+        let raw_uri_str = original_uri.to_string();
+        let raw_echostr_opt = raw_uri_str
+            .split('?')
+            .nth(1)
+            .and_then(|q| q.split('&').find(|kv| kv.starts_with("echostr=")))
+            .map(|kv| kv["echostr=".len()..].to_string());
+        if let Some(raw_echostr) = raw_echostr_opt {
+            let raw_tail = if raw_echostr.len() >= 4 {
+                &raw_echostr[raw_echostr.len() - 4..]
+            } else {
+                raw_echostr.as_str()
+            };
+            let calc_sorted_raw =
+                callback::sha1_signature(&[&state.token, ts, nonce, &raw_echostr]);
+            let calc_concat_raw =
+                callback::sha1_signature_concat(&[&state.token, ts, nonce, &raw_echostr]);
+            eprintln!(
+                "sig dbg (raw echostr): sorted_raw={}, concat_raw={}, raw_tail='{}'",
+                calc_sorted_raw, calc_concat_raw, raw_tail
+            );
+        }
         // Additional signature diagnostics to help identify mismatches.
         let echo_norm = echo.replace(' ', "+");
         let calc_sorted = callback::sha1_signature(&[&state.token, ts, nonce, &echo_norm]);
