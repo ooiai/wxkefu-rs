@@ -133,6 +133,7 @@ Roadmap
 pub mod token;
 pub use token::{AccessToken, Auth, Error, KfClient, Result};
 
+pub mod account;
 pub mod callback;
 pub mod customer;
 pub mod keygen;
