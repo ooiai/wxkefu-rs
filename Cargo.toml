@@ -20,3 +20,14 @@ lru = "0.16"
 bytes = "1"
 async-trait = "0.1"
 quick-xml = { version = "0.38", optional = true }
+anyhow = "1.0"
+
+# Crypto for Kf callback verification and message decryption
+aes = "0.8"
+cbc = "0.1"
+cipher = "0.4"
+sha1 = "0.10"
+base64 = "0.22"
+
+# Server framework for callback handling
+axum = { version = "0.8", features = ["json"] }
