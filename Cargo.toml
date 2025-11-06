@@ -1,12 +1,12 @@
 [package]
 name = "wxkefu-rs"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 
 description = "WeChat Customer Service (WeCom Kf) client for Rust: token, encrypted callback, message sync/send, media, welcome, recall, customer profiles, and Kf account management."
-license = "MIT OR Apache-2.0"
+license = "MIT"
 readme = "README.md"
-repository = "https://github.com/ooiai/wxkefu-rss"
+repository = "https://github.com/ooiai/wxkefu-rs"
 homepage = "https://github.com/ooiai/wxkefu-rs"
 documentation = "https://docs.rs/wxkefu-rs"
 keywords = ["wechat", "wecom", "kf", "customer-service", "wx"]
