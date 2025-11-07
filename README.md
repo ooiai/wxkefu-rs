@@ -269,4 +269,4 @@ Issues and PRs welcome. For major changes, please start a discussion to align on
 
 ## License
 
-Add a LICENSE file (e.g., MIT/Apache-2.0) that suits your project’s needs.
+Add a LICENSE file (e.g., MIT) that suits your project’s needs.
