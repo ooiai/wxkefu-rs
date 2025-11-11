@@ -132,6 +132,8 @@ Roadmap
 
 pub mod token;
 pub use token::{AccessToken, Auth, Error, KfClient, Result};
+pub mod token_cache;
+pub use token_cache::{Error as TokenCacheError, RedisTokenManager, TokenManager};
 
 pub mod account;
 pub mod callback;
