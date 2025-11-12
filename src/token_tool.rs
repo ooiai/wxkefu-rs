@@ -37,6 +37,19 @@
 //!   - REDIS_URL (default: redis://127.0.0.1/)
 //!   - WXKF_CORP_ID
 //!   - WXKF_APP_SECRET
+//!
+//! Performance and alternatives:
+//! - Redis-backed caching is great for multi-instance deployments where you need a single shared token across processes or languages.
+//! - If Redis/network hops add too much latency for your workload, consider an in-process memory cache (e.g., Arc + DashMap + per-key async lock).
+//! - Recommended usage:
+//!   - Single-process or ultra-low-latency path: prefer in-process memory cache to avoid network overhead.
+//!   - Multi-instance / horizontally scaled services: prefer Redis to share one token and avoid N concurrent refreshes across replicas.
+//! - Pitfalls:
+//!   - Memory cache is per-process. Multiple replicas will each fetch once per expiry window (WeCom typically returns the same token while valid).
+//!   - Redis adds a network round-trip but prevents thundering herds across instances and centralizes invalidation.
+//! - Hybrid approach:
+//!   - Memory-first with a Redis second-level cache, or accept per-replica fetches with in-process cache only.
+//! - The refresh policy here (refresh-ahead, safety margin, and backoff) can be reused in an Arc-based manager if you roll your own.
 
 use anyhow::Result;
 use redis::aio::ConnectionManager;
