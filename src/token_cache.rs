@@ -85,6 +85,8 @@ pub struct TokenManager {
     redis: ConnectionManager,
     /// Namespacing for keys, e.g. "wxkefu:token"
     namespace: String,
+    /// Optional explicit Redis key override (when set, namespace/identity are ignored)
+    key_override: Option<String>,
     /// HTTP client for WeChat Kf APIs
     client: KfClient,
     /// Identity (WeCom or OA/MP). This determines the cache key and which endpoint to call.
@@ -105,6 +107,7 @@ impl TokenManager {
         Self {
             redis,
             namespace: "wxkefu:token".to_string(),
+            key_override: None,
             client,
             auth,
             refresh_ahead_secs: 300, // 5 minutes
@@ -117,6 +120,13 @@ impl TokenManager {
     /// Override the Redis key namespace
     pub fn with_namespace(mut self, namespace: impl Into<String>) -> Self {
         self.namespace = namespace.into();
+        self
+    }
+
+    /// Override the Redis token key explicitly (full key). When set,
+    /// `token_key()` will return this value and ignore `namespace` and identity.
+    pub fn with_key_override(mut self, key: impl Into<String>) -> Self {
+        self.key_override = Some(key.into());
         self
     }
 
@@ -206,8 +216,13 @@ impl TokenManager {
         }
     }
 
-    /// Internal: compute the token cache key for the given identity
+    /// Internal: compute the token cache key
+    /// - If `key_override` is set, use it directly (full key)
+    /// - Otherwise, compose from `namespace` and identity
     fn token_key(&self) -> String {
+        if let Some(ref k) = self.key_override {
+            return k.clone();
+        }
         let ident = match &self.auth {
             Auth::OfficialAccount { appid, .. } => format!("oa:{}", appid),
             Auth::WeCom { corp_id, .. } => format!("wecom:{}", corp_id),
