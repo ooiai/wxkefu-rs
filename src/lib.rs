@@ -136,6 +136,8 @@ pub mod token_cache;
 pub use token_cache::{Error as TokenCacheError, RedisTokenManager, TokenManager};
 pub mod token_tool;
 pub use token_tool::{get_token, get_token_with, get_token_with_key};
+pub mod kf_sync_tool;
+pub use kf_sync_tool::{KfSyncTool, MsgHandler, SyncOptions};
 
 pub mod account;
 pub mod callback;
