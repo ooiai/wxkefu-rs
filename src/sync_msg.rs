@@ -252,12 +252,22 @@ impl KfClient {
         let status = resp.status();
         let bytes = resp.bytes().await.map_err(Error::from)?;
 
+        tracing::debug!(
+            "sync_msg response status: {}, body: {}",
+            status,
+            String::from_utf8_lossy(&bytes)
+        );
         // Decode JSON; on errcode != 0, map to Error::Wx
         match serde_json::from_slice::<SyncMsgResponse>(&bytes) {
             Ok(ok) => {
                 if ok.errcode == 0 {
                     Ok(ok)
                 } else {
+                    tracing::warn!(
+                        "sync_msg wx error: errcode={}, errmsg={}",
+                        ok.errcode,
+                        ok.errmsg
+                    );
                     Err(Error::Wx {
                         code: ok.errcode as i64,
                         message: ok.errmsg,
@@ -267,6 +277,11 @@ impl KfClient {
             Err(de_err) => {
                 // Reuse UnexpectedTokenResponse for detailed diagnostics
                 let body = String::from_utf8_lossy(&bytes).to_string();
+                tracing::error!(
+                    "sync_msg response deserialization error: {}, body: {}",
+                    de_err,
+                    body
+                );
                 Err(Error::UnexpectedTokenResponse {
                     status: status.as_u16(),
                     error: de_err.to_string(),
