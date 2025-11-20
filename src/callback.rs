@@ -107,7 +107,10 @@
 //!   this module by default does NOT enforce it (compatible with many existing systems).
 
 use base64::Engine;
-use base64::engine::general_purpose::{STANDARD as BASE64, STANDARD_NO_PAD as BASE64_NO_PAD};
+use base64::engine::general_purpose::{
+    STANDARD as BASE64, STANDARD_NO_PAD as BASE64_NO_PAD, URL_SAFE as BASE64_URL,
+    URL_SAFE_NO_PAD as BASE64_URL_NO_PAD,
+};
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 use sha1::{Digest, Sha1};
 use std::fmt;
@@ -118,7 +121,7 @@ type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
 /// Errors from callback verification and crypto.
 #[derive(thiserror::Error, Debug)]
 pub enum VerifyError {
-    #[error("invalid base64 key length: expect 43 characters (unpadded base64)")]
+    #[error("invalid base64 key length: expect 43 (no '=') or 44 (with '=') characters")]
     BadEncodingAesKeyLength,
     #[error("invalid encoding_aes_key base64: {0}")]
     BadEncodingAesKey(String),
@@ -184,39 +187,56 @@ impl CallbackCrypto {
             padded.push('=');
         }
 
-        // 4) Try decoding without padding first, then with padding
-        let key = match BASE64_NO_PAD.decode(cleaned.as_bytes()) {
-            Ok(k) => k,
-            Err(e1) => match BASE64.decode(padded.as_bytes()) {
-                Ok(k) => k,
-                Err(e2) => {
-                    let cleaned_tail: String = cleaned
-                        .chars()
-                        .rev()
-                        .take(6)
-                        .collect::<Vec<char>>()
-                        .into_iter()
-                        .rev()
-                        .collect();
-                    let padded_tail: String = padded
-                        .chars()
-                        .rev()
-                        .take(6)
-                        .collect::<Vec<char>>()
-                        .into_iter()
-                        .rev()
-                        .collect();
-                    return Err(VerifyError::BadEncodingAesKey(format!(
-                        "{} (nopad_err: {}); cleaned_len={}; cleaned_tail='{}'; padded_len={}; padded_tail='{}' (tip: ensure no hidden whitespace/newlines; both no-pad and padded decoding were attempted)",
-                        e2,
-                        e1,
-                        cleaned.len(),
-                        cleaned_tail,
-                        padded.len(),
-                        padded_tail
-                    )));
+        // 4) Try decoding in this order: standard(no-pad) -> standard(padded) -> url-safe(no-pad) -> url-safe(padded)
+        let key = if let Ok(k) = BASE64_NO_PAD.decode(cleaned.as_bytes()) {
+            k
+        } else if let Ok(k) = BASE64.decode(padded.as_bytes()) {
+            k
+        } else if let Ok(k) = BASE64_URL_NO_PAD.decode(cleaned.as_bytes()) {
+            k
+        } else if let Ok(k) = BASE64_URL.decode(padded.as_bytes()) {
+            k
+        } else {
+            let cleaned_tail: String = cleaned
+                .chars()
+                .rev()
+                .take(6)
+                .collect::<Vec<char>>()
+                .into_iter()
+                .rev()
+                .collect();
+            let padded_tail: String = padded
+                .chars()
+                .rev()
+                .take(6)
+                .collect::<Vec<char>>()
+                .into_iter()
+                .rev()
+                .collect();
+            let last_char = cleaned.chars().last().unwrap_or('\0');
+            let mut last_char_hint = String::new();
+            if cleaned.len() == 43 {
+                // For 32-byte keys (unpadded length 43), the 43rd Base64 char must be one of:
+                // indices {0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60} =>
+                // chars {A,E,I,M,Q,U,Y,c,g,k,o,s,w,0,4,8}
+                let valid = [
+                    'A', 'E', 'I', 'M', 'Q', 'U', 'Y', 'c', 'g', 'k', 'o', 's', 'w', '0', '4', '8',
+                ];
+                if !valid.contains(&last_char) {
+                    last_char_hint = format!(
+                        " (hint: 43-char keys must end with one of A,E,I,M,Q,U,Y,c,g,k,o,s,w,0,4,8; got '{}')",
+                        last_char
+                    );
                 }
-            },
+            }
+            return Err(VerifyError::BadEncodingAesKey(format!(
+                "failed to decode EncodingAESKey using standard/url-safe base64 (no-pad and padded tried); cleaned_len={}; cleaned_tail='{}'; padded_len={}; padded_tail='{}'{} (tip: ensure no hidden whitespace/newlines)",
+                cleaned.len(),
+                cleaned_tail,
+                padded.len(),
+                padded_tail,
+                last_char_hint
+            )));
         };
         if key.len() != 32 {
             return Err(VerifyError::BadAesKeySize);

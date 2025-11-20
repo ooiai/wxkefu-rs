@@ -31,6 +31,53 @@ pub fn generate_token(len: usize) -> String {
     out
 }
 
+/// Java-style helper: generate a random length in [min_length, max_length] (inclusive).
+/// Clamped to [1, 32] to satisfy WeChat token constraints.
+pub fn generate_random_length(min_length: usize, max_length: usize) -> usize {
+    let min = min_length.max(1).min(32);
+    let max = max_length.max(1).min(32);
+    let (lo, hi) = if min <= max { (min, max) } else { (max, min) };
+    let range = (hi - lo + 1) as u64;
+
+    let mut b = [0u8; 8];
+    fill_entropy(&mut b);
+    let rnd = u64::from_ne_bytes(b);
+    lo + (rnd % range) as usize
+}
+
+/// Java-style helper: generate a token with random length between 4 and 32 (inclusive).
+/// Characters are [A-Za-z0-9].
+pub fn generate_random_token() -> String {
+    let len = generate_random_length(4, 32);
+    generate_token(len)
+}
+
+/// Java-style helper: generate an alphanumeric key of a given length.
+/// This mirrors the Java KeyGenerator example (letters/digits only).
+/// NOTE: This does NOT guarantee the result is a valid EncodingAESKey.
+/// For EncodingAESKey, prefer `generate_encoding_aes_key()`.
+pub fn generate_key(length: usize) -> String {
+    let len = length;
+    const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+    // Fill entropy and map bytes to alnum indices.
+    let mut buf = vec![0u8; len];
+    fill_entropy(&mut buf);
+
+    let mut out = String::with_capacity(len);
+    for b in buf {
+        out.push(ALNUM[(b as usize) % ALNUM.len()] as char);
+    }
+    out
+}
+
+/// Java-style helper: generate a default 43-char alphanumeric key.
+/// NOTE: For a real WeChat EncodingAESKey, use `generate_encoding_aes_key()`,
+/// which guarantees Base64 semantics (43 chars; decodes to 32 bytes when padded).
+pub fn generate_default_key() -> String {
+    generate_key(43)
+}
+
 /// Generate a 43-character EncodingAESKey (alphanumeric only) derived from 32 random bytes.
 /// Appending a single '=' must decode back to 32 bytes when treated as standard Base64.
 /// Per WeChat spec: "由英文或数字组成" means ONLY [A-Za-z0-9], no +/ symbols.

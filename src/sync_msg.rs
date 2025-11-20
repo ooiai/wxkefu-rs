@@ -67,12 +67,71 @@ pub struct SyncMsgItemCommon {
 }
 
 /// A single message item (common fields + typed payload via `msgtype`)
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SyncMsgItem {
-    #[serde(flatten)]
     pub common: SyncMsgItemCommon,
-    #[serde(flatten)]
     pub payload: MsgPayload,
+}
+
+// Custom Deserialize to be robust to missing top-level `open_kfid` (fill from `event.open_kfid`)
+impl<'de> serde::Deserialize<'de> for SyncMsgItem {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as DeError;
+
+        // Deserialize into a JSON value to patch fields if needed
+        let mut v: serde_json::Value = serde_json::Value::deserialize(deserializer)?;
+
+        // If top-level open_kfid is missing, try to fill from event.open_kfid
+        let has_open = v.get("open_kfid").and_then(|x| x.as_str()).is_some();
+        if !has_open {
+            if let Some(_event_obj) = v.get("event") {
+                let okf_opt = v
+                    .get("event")
+                    .and_then(|ev| ev.get("open_kfid"))
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string());
+                if let Some(okf) = okf_opt {
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("open_kfid".to_string(), serde_json::Value::String(okf));
+                    }
+                }
+            }
+        }
+
+        // Deserialize the patched value into a helper raw struct, then construct SyncMsgItem
+        let raw: SyncMsgItemValue = serde_json::from_value(v)
+            .map_err(|e| DeError::custom(format!("patched decode failed: {}", e)))?;
+
+        Ok(SyncMsgItem {
+            common: SyncMsgItemCommon {
+                msgid: raw.msgid,
+                open_kfid: raw.open_kfid,
+                external_userid: raw.external_userid,
+                send_time: raw.send_time,
+                origin: raw.origin,
+            },
+            payload: raw.payload,
+        })
+    }
+}
+
+// Helper struct that represents flattened fields for robust deserialization
+#[derive(Debug, Clone, Deserialize)]
+struct SyncMsgItemValue {
+    // Flattened common fields
+    msgid: String,
+    open_kfid: String,
+    #[serde(default)]
+    external_userid: Option<String>,
+    send_time: u64,
+    #[serde(default)]
+    origin: Option<u32>,
+    // Flattened typed payload (only payload is flattened)
+    #[serde(flatten)]
+    payload: MsgPayload,
 }
 
 /// Typed payload by msgtype
@@ -252,12 +311,22 @@ impl KfClient {
         let status = resp.status();
         let bytes = resp.bytes().await.map_err(Error::from)?;
 
+        tracing::debug!(
+            "sync_msg response status: {}, body: {}",
+            status,
+            String::from_utf8_lossy(&bytes)
+        );
         // Decode JSON; on errcode != 0, map to Error::Wx
         match serde_json::from_slice::<SyncMsgResponse>(&bytes) {
             Ok(ok) => {
                 if ok.errcode == 0 {
                     Ok(ok)
                 } else {
+                    tracing::warn!(
+                        "sync_msg wx error: errcode={}, errmsg={}",
+                        ok.errcode,
+                        ok.errmsg
+                    );
                     Err(Error::Wx {
                         code: ok.errcode as i64,
                         message: ok.errmsg,
@@ -267,6 +336,11 @@ impl KfClient {
             Err(de_err) => {
                 // Reuse UnexpectedTokenResponse for detailed diagnostics
                 let body = String::from_utf8_lossy(&bytes).to_string();
+                tracing::error!(
+                    "sync_msg response deserialization error: {}, body: {}",
+                    de_err,
+                    body
+                );
                 Err(Error::UnexpectedTokenResponse {
                     status: status.as_u16(),
                     error: de_err.to_string(),
